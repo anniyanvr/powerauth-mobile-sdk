@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-#include <PowerAuthCore/PowerAuthCore.h>
-#include <XCTest/XCTest.h>
+#import <XCTest/XCTest.h>
 
 #include <cc7/CC7.h>
 #include <cc7/objc/ObjcHelper.h>
+
+#import <PowerAuthCore/PowerAuthCore.h>
 
 @interface PowerAuthCoreCryptoUtilsTests : XCTestCase
 @end
@@ -91,6 +92,9 @@ struct EcdsaTestData {
     NSMutableData * testData = [[PowerAuthCoreCryptoUtils randomBytes:128] mutableCopy];
     XCTAssertNotNil(testData);
     NSData * signature = [PowerAuthCoreCryptoUtils ecdsaComputeSignature:testData withPrivateKey:keyPair.privateKey];
+    NSLog(@"Data: %@", [testData base64EncodedStringWithOptions:0]);
+    NSLog(@"PubK: %@", [keyPair.publicKey.publicKeyBytes base64EncodedStringWithOptions:0]);
+    NSLog(@"Sign: %@", [signature base64EncodedStringWithOptions:0]);
     BOOL result = [PowerAuthCoreCryptoUtils ecdsaValidateSignature:signature forData:testData forPublicKey:keyPair.publicKey];
     XCTAssertTrue(result);
     unsigned char * bytePtr = (unsigned char *)[testData mutableBytes];
@@ -105,8 +109,8 @@ struct EcdsaTestData {
     PowerAuthCoreECKeyPair * bob = [PowerAuthCoreCryptoUtils ecGenerateKeyPair];
     XCTAssertNotNil(alice);
     XCTAssertNotNil(bob);
-    NSData * aliceSharedSecret = [PowerAuthCoreCryptoUtils ecdhComputeSharedSecret:bob.publicKey withPrivateKey:alice.privateKey];
-    NSData * bobSharedSecret = [PowerAuthCoreCryptoUtils ecdhComputeSharedSecret:alice.publicKey withPrivateKey:bob.privateKey];
+    PowerAuthCoreData * aliceSharedSecret = [PowerAuthCoreCryptoUtils ecdhComputeSharedSecret:bob.publicKey withPrivateKey:alice.privateKey];
+    PowerAuthCoreData * bobSharedSecret = [PowerAuthCoreCryptoUtils ecdhComputeSharedSecret:alice.publicKey withPrivateKey:bob.privateKey];
     XCTAssertTrue([aliceSharedSecret isEqual:bobSharedSecret]);
 }
 

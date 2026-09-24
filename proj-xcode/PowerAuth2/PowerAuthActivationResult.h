@@ -14,27 +14,22 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthActivationRecoveryData.h>
+#import "PowerAuthUserInfo.h"
 
-/**
- The PowerAuthActivationResult object represents successfull result from the activation
- process.
- */
+/// The PowerAuthActivationResult object represents successful result from the activation process.
 @interface PowerAuthActivationResult : NSObject
-/**
- Decimalized fingerprint calculated from device's public key.
- */
-@property (nonatomic, strong, nonnull) NSString * activationFingerprint;
-/**
- If supported and enabled on the server, then the object contains "Recovery Code" and PUK,
- created for this particular activation. Your application should display that values to the user
- and forget the values immediately. You should NEVER store values from the object persistently on the device.
- */
-@property (nonatomic, strong, nullable) PowerAuthActivationRecoveryData * activationRecovery;
-/**
- Custom attributes received from the server. The value may be nil in case that there
- are no custom attributes available.
- */
-@property (nonatomic, strong, nullable) NSDictionary<NSString*, NSObject*>* customAttributes;
+
+/// Default construction is unavailable
+- (nonnull instancetype) init NS_UNAVAILABLE;
+
+/// Decimalized fingerprint calculated from device's public key.
+@property (nonatomic, strong, readonly, nonnull) NSString * activationFingerprint;
+/// Custom attributes received from the server. The value may be nil in case that there
+/// are no custom attributes available.
+@property (nonatomic, strong, readonly, nullable) NSDictionary<NSString*, NSObject*>* customAttributes;
+
+/// Information about user's identity. The value is optional and depending on whether the server
+/// implementation provide such information in the time of activation.
+@property (nonatomic, strong, readonly, nullable) PowerAuthUserInfo * userInfo;
 
 @end

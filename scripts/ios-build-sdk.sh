@@ -6,7 +6,7 @@
 # library distribution. Typically, this script is used for CocoaPods integration.
 # 
 # The result of the build process is:
-#    PowerAuthCore.xcframework or PowerAuth2.xcframework:
+#    PowerAuth2.xcframework:
 #      multi-architecture, multi-platform dynamic framework (also called as "fat") 
 #      with all core functionality of PowerAuth2 SDK. The library contains all C++
 #      code, plus thin ObjC wrapper written on top of that codes.
@@ -32,27 +32,20 @@
 # -----------------------------------------------------------------------------
 TOP=$(dirname $0)
 source "${TOP}/common-functions.sh"
+source "${TOP}/config-apple.sh"
 SRC_ROOT="`( cd \"$TOP/..\" && pwd )`"
 
 #
 # Source headers & Xcode project location
 #
-SOURCE_FILES="${SRC_ROOT}/proj-xcode/PowerAuth2"
+XCODE_DIR="${SRC_ROOT}/proj-xcode"
+SOURCE_FILES="${XCODE_DIR}/PowerAuth2"
 
 #
 # Platforms & CPU architectures
 #
-PLATFORMS="iOS iOS_Simulator tvOS tvOS_Simulator macOS_Catalyst"
-# Platform architectures
-ARCH_IOS="armv7 armv7s arm64 arm64e"
-ARCH_IOS_SIM="i386 x86_64"
-ARCH_CATALYST="x86_64"
-ARCH_TVOS="arm64"
-ARCH_TVOS_SIM="x86_64"
-# Minimum OS version
-MIN_VER_IOS="9.0"
-MIN_VER_TVOS="9.0"
-MIN_VER_CATALYST="10.15"
+PLATFORMS="iOS iOS_Simulator macOS_Catalyst"
+PLATFORMS_TVOS="tvOS tvOS_Simulator"
 
 # Variables loaded from command line
 VERBOSE=1
@@ -60,9 +53,11 @@ FULL_REBUILD=1
 CLEANUP_AFTER=1
 OUT_DIR=''
 TMP_DIR=''
-DO_BUILDCORE=0
 DO_BUILDSDK=0
-DO_COPYSDK=0
+OPT_LEGACY_ARCH=0
+OPT_USE_BITCODE=0
+OPT_WEAK_TVOS=0
+OPT_INCLUDE_DSYMS=0
 
 # -----------------------------------------------------------------------------
 # USAGE prints help and exits the script with error code from provided parameter
@@ -76,13 +71,14 @@ function USAGE
     echo ""
     echo "commands are:"
     echo ""
-    echo "  copySdk           Copy SDK files to output directory"
-    echo "  buildCore         Build PowerAuthCore.xcframework to out directory"
     echo "  buildSdk          Build PowerAuth2.xcframework to out directory"
     echo ""
     echo "options are:"
+    echo ""
     echo "  -nc | --no-clean  disable 'clean' before 'build'"
     echo "                    also disables temporary data cleanup after build"
+    echo "  --optional-tvos   tvOS is not required when SDK is not installed"
+    echo "  --include-dsyms   include debug symbols into final xcframework"
     echo "  -v0               turn off all prints to stdout"
     echo "  -v1               print only basic log about build progress"
     echo "  -v2               print full build log with rich debug info"
@@ -90,6 +86,16 @@ function USAGE
     echo "                    will be stored"
     echo "  --tmp-dir path    changes temporary directory to |path|"
     echo "  -h | --help       prints this help information"
+    echo ""
+    echo "legacy options:"
+    echo ""
+    echo "  --legacy-archs    compile also legacy architectures"
+    echo "  --use-bitcode     compile with enabled bitcode"
+    echo ""
+    echo "  Be aware that if you use legacy options then the script will"
+    echo "  rebuild OpenSSL library and will left changes in 'cc7' submodule."
+    echo "  If you want to switch back to regular build, then please revert"
+    echo "  all changed files in 'cc7' folder."
     echo ""
     exit $1
 }
@@ -181,44 +187,81 @@ function GET_PLATFORM_SCHEME
         *) FAILURE "Cannot determine build scheme. Unsupported platform: '$1'" ;;
     esac
 }
+function GET_DEPLOYMENT_TARGETS
+{
+    local target=
+    target+=" IPHONEOS_DEPLOYMENT_TARGET=${MIN_VER_IOS}"
+    target+=" TVOS_DEPLOYMENT_TARGET=${MIN_VER_TVOS}"
+    target+=" MACOSX_DEPLOYMENT_TARGET=${MIN_VER_CATALYST}"
+    target+=" WATCHOS_DEPLOYMENT_TARGET=${MIN_VER_WATCHOS}"
+    echo $target
+}
+function GET_BITCODE_OPTION
+{
+    [[ x$OPT_USE_BITCODE == x0 ]] && echo "ENABLE_BITCODE=NO"
+    [[ x$OPT_USE_BITCODE == x1 ]] && echo "ENABLE_BITCODE=YES"
+}
 
 # -----------------------------------------------------------------------------
-# Copy all source files in SDK to destination directory
-# Parameters:
-#   $1   - source directory
-#   $2   - destination directory
+# Prepare legacy / regular OpenSSL build
 # -----------------------------------------------------------------------------
-function COPY_SOURCE_FILES
+function PREPARE_LEGACY_OPENSSL
 {
-    local SRC="$1"
-    local DST="$2"
+    LOG_LINE
+    LOG "|            Going to prepare OpenSSL library for legacy build.             |"
+    LOG_LINE
+    LOG "|     Be aware that if you use legacy options then the script will          |"
+    LOG "|     rebuild OpenSSL library and will left changes in 'cc7' submodule.     |"
+    LOG "|     If you want to switch back to regular build, then please revert       |"
+    LOG "|     all changed files in 'cc7' folder.                                    |"
+    LOG_LINE
     
-    # Prepare dirs in output directory
-    DST="`( cd \"$DST\" && pwd )`"
-    $MD "${DST}"
-    $MD "${DST}/Private"
+    local opts="apple --local $CC7_VERSION_EXT"
+    [[ x$OPT_USE_BITCODE == x1 ]] && opts+=' --apple-enable-bitcode'
+    [[ x$OPT_LEGACY_ARCH == x1 ]] && opts+=' --apple-legacy-archs'
     
-    # Copy public / private SDK folders
-    PUSH_DIR "$SRC"
-    ####
-    local FILES=(`grep -R -null --include "*.h" --include "*.m" "" .`)
-    # Do for each file we found...
-    for ix in ${!FILES[*]}
-    do
-        local FILE="${FILES[$ix]}"
-        local DEST_DIR="$DST"
-        case "$FILE" in 
-          ./private/*)
-            DEST_DIR="$DST/Private"
-            ;;
-        esac
-        $CP "${FILE}" "${DEST_DIR}"
-    done
-    ####
+    "$SRC_ROOT/cc7/openssl-build/build.sh" $opts
+}
+function PEPARE_REGULAR_OPENSSL
+{
+    LOG_LINE
+    LOG "|            Going to prepare OpenSSL library for regular build.            |"
+    LOG_LINE
+    
+    REQUIRE_COMMAND git
+    
+    PUSH_DIR "$SRC_ROOT/cc7"
+    git checkout .
     POP_DIR
-    
-    # Remove umbrella header, because CocoaPods generates its own.
-    $RM "${DST}/PowerAuth2.h"
+}
+function PREPARE_OPENSSL
+{
+    # Load cc7 version
+    source "$SRC_ROOT/cc7/openssl-build/version.sh"
+    local DEFAULT_STATUS="${CC7_VERSION_EXT}-a00"
+    # Load status from file if status file exists
+    local STATUS_FILE="$SRC_ROOT/cc7/.apple-legacy-build"
+    if [ -f "$STATUS_FILE" ]; then
+        local OLD_STATUS=`cat $STATUS_FILE`
+    else
+        local OLD_STATUS=$DEFAULT_STATUS
+    fi
+    # Compare old and new status and decide what to do...
+    local NEW_STATUS="${CC7_VERSION_EXT}-a$OPT_USE_BITCODE$OPT_LEGACY_ARCH"
+    if [ $OLD_STATUS == $NEW_STATUS ]; then
+        # There's no change in status.
+        return
+    elif [ $NEW_STATUS != $DEFAULT_STATUS ]; then
+        # Status is different than default, so re-build OpenSSL 
+        # and then store status to file.
+        PREPARE_LEGACY_OPENSSL
+        echo $NEW_STATUS > $STATUS_FILE
+    else
+        # Status is default, so revert changes in 'cc7' and remove
+        # status file. 
+        PEPARE_REGULAR_OPENSSL
+        [[ -f "$STATUS_FILE" ]] && $RM "$STATUS_FILE"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -241,6 +284,8 @@ function BUILD_COMMAND
     local PLATFORM_TARGET="$(GET_PLATFORM_TARGET $PLATFORM)"
     local MIN_SDK_VER="$(GET_PLATFORM_MIN_OS_VER $PLATFORM)"
     local SCHEME=$(GET_PLATFORM_SCHEME $PLATFORM)
+    local DEPLOYMENT_TARGETS=$(GET_DEPLOYMENT_TARGETS)
+    local BITCODE_OPTION=$(GET_BITCODE_OPTION)
     
     LOG_LINE
     LOG "Building ${PLATFORM} (${MIN_SDK_VER}+) for architectures ${PLATFORM_ARCHS}"
@@ -252,6 +297,7 @@ function BUILD_COMMAND
     COMMAND_LINE+=" -sdk ${PLATFORM_SDK} ARCHS=\"${PLATFORM_ARCHS}\""
     COMMAND_LINE+=" -destination \"${PLATFORM_DEST}\""
     COMMAND_LINE+=" SKIP_INSTALL=NO BUILD_LIBRARIES_FOR_DISTRIBUTION=YES"
+    COMMAND_LINE+=" ${DEPLOYMENT_TARGETS} ${BITCODE_OPTION}"
     [[ $PLATFORM == 'macOS_Catalyst' ]] && COMMAND_LINE+=" SUPPORTS_MACCATALYST=YES"
     [[ $VERBOSE -lt 2 ]] && COMMAND_LINE+=" -quiet"
     
@@ -260,8 +306,14 @@ function BUILD_COMMAND
 
     # Add produced platform framework to the list
     local FINAL_FW="${ARCHIVE_PATH}/Products/Library/Frameworks/${OUT_FW}.framework"
+    local FINAL_DSYM="${ARCHIVE_PATH}/dSYMs/${OUT_FW}.framework.dSYM"
     [[ ! -d "${FINAL_FW}" ]] && FAILURE "Xcode build did not produce '${OUT_FW}.framework' for platform ${PLATFORM}"
     ALL_FAT_LIBS+=("${FINAL_FW}")
+    ALL_XCFW_ARGS+=" -framework ${FINAL_FW}"
+    if [ x$OPT_INCLUDE_DSYMS == x1 ]; then
+        [[ ! -d "${FINAL_DSYM}" ]] && FAILURE "Xcode build did not produce dSYMs for '${OUT_FW}.framework' for platform ${PLATFORM}"
+        ALL_XCFW_ARGS+=" -debug-symbols ${FINAL_DSYM}"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -283,9 +335,14 @@ function BUILD_LIB
     
     LOG_LINE
     LOG "Building $LIB_NAME for supported platforms..."
+    LOG "  - macOS $(sw_vers -productVersion) ($(uname -m))"
+    LOG "  - Xcode $(GET_XCODE_VERSION --full)"
     LOG_LINE
+    
+    PREPARE_OPENSSL
 
     ALL_FAT_LIBS=()
+    ALL_XCFW_ARGS=
     
     BUILD_PATCH_ARCHITECTURES
     
@@ -299,53 +356,12 @@ function BUILD_LIB
     LOG_LINE
     LOG "Creating final ${OUT_FW}.xcframework..."
     local XCFW_PATH="${OUT_DIR}/${OUT_FW}.xcframework"
-    local XCFW_ARGS=
     for ARG in ${ALL_FAT_LIBS[@]}; do
-        XCFW_ARGS+="-framework ${ARG} "
         DEBUG_LOG "  - source fw: ${ARG}"
     done
     DEBUG_LOG "  - target fw: ${XCFW_PATH}"
     
-    xcodebuild -create-xcframework $XCFW_ARGS -output "${XCFW_PATH}"    
-}
-
-# -----------------------------------------------------------------------------
-# Copy PowerAuth2 SDK sources to destination folder.
-# -----------------------------------------------------------------------------
-function COPY_SDK_SOURCES
-{
-    LOG_LINE
-    LOG "Copying SDK files ..."
-    LOG_LINE
-    
-    # Copy source files...
-    COPY_SOURCE_FILES "${SOURCE_FILES}" "${OUT_DIR}"
-}
-
-# -----------------------------------------------------------------------------
-# Adjust CPU architectures supported in Xcode, depending on Xcode version.
-# -----------------------------------------------------------------------------
-function BUILD_PATCH_ARCHITECTURES
-{
-    local xcodever=( $(GET_XCODE_VERSION --split) )
-    if (( ${xcodever[0]} == -1 )); then
-        FAILURE "Invalid Xcode installation."
-    fi
-    if (( ${xcodever[0]} >= 12 )); then
-        # Greater and equal than 12.0
-        DEBUG_LOG "Adding arm64 architectures to targets, due to support in Xcode."
-        ARCH_IOS_SIM+=" arm64"
-        ARCH_TVOS_SIM+=" arm64"
-        if [[ (${xcodever[0]} == 12 && ${xcodever[1]} < 2) ]]; then
-            # 12.0 or 12.1
-            WARNING "Building library on older than Xcode 12.2. ARM64 for Catalyst will be omitted."
-        else
-            # Greater and equal than 12.2
-            ARCH_CATALYST+=" arm64"
-        fi
-    else
-        WARNING "Building library on older than Xcode 12. Several ARM64 architectures will be omitted."
-    fi
+    xcodebuild -create-xcframework $ALL_XCFW_ARGS -output "${XCFW_PATH}"    
 }
 
 # -----------------------------------------------------------------------------
@@ -368,6 +384,68 @@ function CLEAN_COMMAND
     xcodebuild clean -project "${XCODE_PROJECT}" -scheme ${XCODE_SCHEME_IOS} -destination ${DESTINATION} ${QUIET}
 }
 
+# -----------------------------------------------------------------------------
+# Test whether tvOS SDK is installed locally. Prints "1" to stdout if yes,
+# otherwise "0".
+# -----------------------------------------------------------------------------
+function FIND_TVOS_SDK
+{
+    local old_VERBOSE=$VERBOSE; 
+    VERBOSE=0; PUSH_DIR "$XCODE_DIR"
+    local project='PowerAuthCore.xcodeproj'
+    local scheme='PowerAuthCore_tvOS'
+    # This is quite hardcore, but unfortunatelly there's no command line option to test whether SDK is really installed.
+    # The idea behind this is that when tvOS SDK is installed, then there are already a some run or build destinations for it.
+    # If tvOS SDK is not installed, then the placeholder SDK is reported, with "not installed" error in the description. 
+    set +e
+    xcodebuild -showdestinations -project $project -scheme $scheme -quiet 2>/dev/null | grep 'not installed' > /dev/null 2>&1;
+    if (($? == 0)); then
+        echo "0"    # Grep found 'not installed' so SDK is not available
+    else
+        echo "1"    # Grep did not find the requested string, so SDK is not available
+    fi
+    set -e
+    POP_DIR; VERBOSE=$old_VERBOSE
+}
+
+# -----------------------------------------------------------------------------
+# Patch PLATFORMS list depending on the current Xcode capability
+# -----------------------------------------------------------------------------
+function DO_PATCH_TARGETS
+{
+    # tvOS is enforced (the default behavior)
+    local use_tvos=1
+    if (( $(GET_XCODE_VERSION --major) >= 14 )); then
+        # If Xcode version is greater or equal to 14, then additional SDKs are optional
+        local tvos=$(FIND_TVOS_SDK)
+        case "$tvos" in
+            0)
+                if [ x$OPT_WEAK_TVOS == x0 ]; then
+                    LOG_LINE
+                    LOG "tvOS SDK is optional since Xcode 14 but is required by PowerAuth mobile SDK."
+                    LOG "You can use the following solutions to fix this problem:"
+                    LOG ""
+                    LOG " 1. download all optional platform SDKs:"
+                    LOG "      xcodebuild -downloadAllPlatforms"
+                    LOG ""
+                    LOG " 2. Skip tvOS platform if it's not important to your project:"
+                    LOG "      add '--optional-tvos' switch to this build script"
+                    LOG_LINE
+                    FAILURE "tvOS SDK is not installed."
+                else
+                    WARNING "tvOS SDK is not installed, so skipping this platform in the build."
+                    use_tvos=0
+                fi
+                ;;
+            1) DEBUG_LOG "tvOS SDK appears to be installed" ;;
+            *) FAILURE "Unexpected result from tvOS SDK evaluation: $tvos" ;;
+        esac
+    fi
+    if [ x$use_tvos == x1 ]; then
+        PLATFORMS+=" $PLATFORMS_TVOS"
+    fi
+}
+
 ###############################################################################
 # Script's main execution starts here...
 # -----------------------------------------------------------------------------
@@ -377,13 +455,13 @@ do
     opt="$1"
     case "$opt" in
         buildCore)
-            DO_BUILDCORE=1
+            FAILURE "'buildCore' command is no longer supported."
             ;;
         buildSdk)
             DO_BUILDSDK=1
             ;;
         copySdk)
-            DO_COPYSDK=1
+            FAILURE "'copySdk' command is no longer supported."
             ;;
         -nc | --no-clean)
             FULL_REBUILD=0 
@@ -396,6 +474,18 @@ do
         --out-dir)
             OUT_DIR="$2"
             shift
+            ;;
+        --optional-tvos)
+            OPT_WEAK_TVOS=1
+            ;;
+        --include-dsyms)
+            OPT_INCLUDE_DSYMS=1
+            ;;
+        --legacy-archs)
+            OPT_LEGACY_ARCH=1
+            ;;
+        --use-bitcode)
+            OPT_USE_BITCODE=1
             ;;
         -v*)
             SET_VERBOSE_LEVEL_FROM_SWITCH $opt
@@ -410,8 +500,8 @@ do
     shift
 done
 
-if [ x$DO_BUILDCORE$DO_BUILDSDK$DO_COPYSDK == x000 ]; then
-    FAILURE "No command specified. Use 'buildCore', 'buildSdk' or 'copySdk' parameter."
+if [ x$DO_BUILDSDK == x0 ]; then
+    FAILURE "No command specified. Use 'buildSdk' parameter."
 fi
 
 # Defaulting target & temporary folders
@@ -440,9 +530,10 @@ $MD "${TMP_DIR}"
 #
 # Build core or copy SDK
 #
-[[ x$DO_BUILDCORE == x1 ]] && BUILD_LIB PowerAuthCore
+if [[ x$DO_BUILDSDK == x1 ]]; then
+    DO_PATCH_TARGETS
+fi
 [[ x$DO_BUILDSDK == x1 ]] && BUILD_LIB PowerAuth2
-[[ x$DO_COPYSDK == x1 ]] && COPY_SDK_SOURCES
 
 #
 # Remove temporary data

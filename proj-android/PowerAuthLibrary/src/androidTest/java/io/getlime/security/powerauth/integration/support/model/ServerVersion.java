@@ -30,14 +30,33 @@ public enum ServerVersion {
     V1_1_0("1.1", 1001000, ProtocolVersion.V3_1),
     V1_2_0("1.2", 1002000, ProtocolVersion.V3_1),
     V1_2_5("1.2.5", 1002005, ProtocolVersion.V3_1),
-    V1_3_0("1.3", 1003000, ProtocolVersion.V3_1)
-
+    V1_3_0("1.3", 1003000, ProtocolVersion.V3_1),
+    V1_4_0("1.4", 1004000, ProtocolVersion.V3_1),
+    V1_5_0("1.5", 1005000, ProtocolVersion.V3_2),
+    V1_6_0("1.6", 1006000, ProtocolVersion.V3_2),
+    V1_7_0("1.7", 1007000, ProtocolVersion.V3_2),
+    V1_8_0("1.8", 1008000, ProtocolVersion.V3_2),
+    V1_9_0("1.9", 1009000, ProtocolVersion.V3_3),
+    V1_10_0("1.10", 1010000, ProtocolVersion.V3_3),
+    V2_0_0("2.0", 2000000, ProtocolVersion.V4_0),
+    V2_1_0("2.1", 2001000, ProtocolVersion.V4_0),
+    V2_2_0("2.2", 2002000, ProtocolVersion.V4_0),
     ;
+
+    /**
+     * Features added or removed over the time.
+     */
+    public enum Feature {
+        /**
+         * Starting 2.0, the recovery codes feature is NOT supported.
+         */
+        RECOVERY_CODES
+    }
 
     /**
      * Contains constant for the latest PowerAuth Server version.
      */
-    public static final ServerVersion LATEST = V1_3_0;
+    public static final ServerVersion LATEST = V2_2_0;
 
     /**
      * Server version represented as string.
@@ -73,6 +92,18 @@ public enum ServerVersion {
      */
     public int getMinorVersion() {
         return (numericVersion % 1000000) / 1000;
+    }
+
+    /**
+     * Test feature support with this version of the server.
+     * @param feature Feature to test.
+     * @return `true` if feature is supported.
+     */
+    public boolean isFeatureSupported(@NonNull Feature feature) {
+        if (feature == Feature.RECOVERY_CODES) {
+            return numericVersion < V2_0_0.numericVersion;
+        }
+        return false;
     }
 
     /**

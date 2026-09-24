@@ -68,9 +68,13 @@ PowerAuth Mobile SDK in version `1.7.0` is a maintenance release that brings mul
 
 - `IOException` is no longer reported from SDK's internal networking. Now all such exceptions are wrapped into `PowerAuthErrorException` with `NETWORK_ERROR` code set.
 
-- Please read also [Changes introduced in 1.7.2](#changes-in-172) version.
+- Please read also changes introduced in [1.7.2](#changes-in-172), [1.7.3](#changes-in-173) and [1.7.5](#changes-in-175) versions.
 
 ## iOS & tvOS
+
+<!-- begin box warning -->
+Version 1.7.3 increased minimum required iOS & tvOS deployment target to 11.0. See [Xcode 14 support](#xcode14-support).
+<!-- end -->
 
 ### API changes
 
@@ -115,7 +119,7 @@ PowerAuth Mobile SDK in version `1.7.0` is a maintenance release that brings mul
   - You can see how's user agent string constructed by reading a new `userAgent` property of `PowerAuthClientConfiguration` object.
   - To set the previous networking behavior, you can set `nil`
   
-- Please read also [Changes introduced in 1.7.2](#changes-in-172) version.
+- Please read also changes introduced in [1.7.2](#changes-in-172) and [1.7.3](#changes-in-173) versions.
 
 ## iOS & tvOS App Extensions
 
@@ -125,6 +129,10 @@ PowerAuth Mobile SDK in version `1.7.0` is a maintenance release that brings mul
 - `PowerAuthTokenStore.removeLocalToken()` and `PowerAuthTokenStore.removeAllLocalTokens|()` functions are now disabled for app extensions. You have to manage tokens from the main application now.
 
 ## watchOS
+
+<!-- begin box warning -->
+Version 1.7.3 increased minimum required watchOS deployment target to 4.0. See [Xcode 14 support](#xcode14-support).
+<!-- end -->
 
 ### API changes
 
@@ -155,3 +163,63 @@ The following interfaces are marked as deprecated since 1.7.2 version:
 - `PowerAuthSDK.addBiometryFactor(_, callback)` is deprecated, use `addBiometryFactor(password:, callback:)` as a replacement.
 
 - Using `PowerAuthAuthentication.usePassword` property is now deprecated. To test whether authentication has the knowledge factor set, use `password` property, which contains nullable `PowerAuthCorePassword` object.
+
+
+## Changes in 1.7.3+
+
+### Xcode14 support
+
+Due to changes in Xcode 14, bitcode is no longer supported and we had to increase minimum supported OS to the following versions:
+
+- iOS 11.0
+- tvOS 11.0
+- watchOS 4.0
+
+If you still have to compile our SDK for older operating systems, then you need to build the library manually with Xcode older than 14.0. For example:
+
+1. Clone repository
+   ```bash
+   git clone --recursive https://github.com/wultra/powerauth-mobile-sdk.git
+   cd powerauth-mobile-sdk
+   git submodule update
+   ```
+1. Make sure that xcodebuild is older than 14.0:
+   ```bash
+   % xcodebuild -version
+   Xcode 13.2.1
+   Build version 13C100
+   ```
+1. Build library with legacy architectures and bitcode:
+   ```bash
+   ./scripts/ios-build-sdk.sh buildCore buildSdk --legacy-archs --use-bitcode --out-dir ./Build
+   ```
+   Similar command is available for app extensions and watchos:
+   ```bash
+   ./scripts/ios-build-extensions.sh extensions watchos --legacy-archs --use-bitcode --out-dir ./Build
+   ```
+
+If you use cocoapds for PowerAuth mobile SDK integration, then please let us know and we'll prepare a special release branch for you.
+
+## Changes in 1.7.5+
+
+### iOS
+
+The behavior of `PowerAuthSDK.authenticateUsingBiometry()` has been slightly changed and improved:
+
+- Function now properly treat biometry lockout and increase failed attempts counter on the server, See [Biometry lockout](PowerAuth-SDK-for-iOS.md#biometry-lockout) chapter.
+- Function now returns new `PowerAuthErrorCode_BiometryFallback` error code in case that user tap on the fallback button.
+- As a benefit, function now properly handles situations when the user press home or power button during the biometric authentication.
+- You can also cancel the pending authentication with using `LAContext.invalidate()` method.
+
+### tvOS
+
+The `PowerAuthSDK.authenticateUsingBiometry()` function is no longer available on tvOS platform.
+
+## Changes in 1.7.10+
+
+### Android
+
+- The shared biometry-related encryption key is no longer supported in `PowerAuthSDK`. If an activation is already using the shared key, then it's in use until the activation or the biometry factor is removed. As part of this change, the following methods are now deprecated:
+  - Method `PowerAuthSDK.removeActivationLocal(Context, boolean)` is now deprecated. Use `removeActivationLocal(Context)` as a replacement.
+  - Method `PowerAuthKeychainConfiguration.getKeychainBiometryDefaultKey()` is now deprecated. Use `getKeychainKeyBiometry()` as a replacement.
+  - Method `PowerAuthKeychainConfiguration.Builder.keychainBiometryDefaultKey(String)` is now deprecated. Use `keychainKeyBiometry(String)` as a replacement.

@@ -20,6 +20,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import java.util.Arrays;
 
+import jakarta.validation.constraints.Null;
+
 /**
  * The CryptoUtils class provides a several general cryptographic primitives
  * required in our other open source libraries.
@@ -27,7 +29,7 @@ import java.util.Arrays;
 public class CryptoUtils {
 
     static {
-        System.loadLibrary("PowerAuth2Module");
+       NativeModule.loadNativeModule();
     }
 
     /**
@@ -39,28 +41,12 @@ public class CryptoUtils {
     /**
      * Validates ECDSA signature for given data and EC public key.
      *
-     * This method is now deprecated. As a replacement you can use {@link #ecdsaValidateSignature(byte[], byte[], EcPublicKey)}
-     * variant that provides a better performance.
-     *
-     * @param data signed data
-     * @param signature signature calculated for data
-     * @param publicKeyData EC public key
-     * @return true if signature is valid
-     */
-    @Deprecated // 1.7.0
-    public static boolean ecdsaValidateSignature(byte[] data, byte[] signature, byte[] publicKeyData) {
-        return ecdsaValidateSignature(data, signature, new EcPublicKey(publicKeyData));
-    }
-
-    /**
-     * Validates ECDSA signature for given data and EC public key.
-     *
      * @param data signed data
      * @param signature signature calculated for data
      * @param publicKey EC public key
      * @return true if signature is valid
      */
-    public static native boolean ecdsaValidateSignature(byte[] data, byte[] signature, EcPublicKey publicKey);
+    public static native boolean ecdsaValidateSignature(@Nullable byte[] data, @NonNull byte[] signature, @NonNull EcPublicKey publicKey);
 
     /**
      * Create ECDSA signature for given data and EC private key.
@@ -69,15 +55,15 @@ public class CryptoUtils {
      * @param privateKey EC public key
      * @return Array of bytes with signature or null in case of failure.
      */
-    public static native byte[] ecdsaComputeSignature(byte[] data, EcPrivateKey privateKey);
+    public static native byte[] ecdsaComputeSignature(@Nullable byte[] data, @NonNull EcPrivateKey privateKey);
 
     /**
      * Compute shared secret with using ECDH key-agreement.
      * @param publicKey Public key.
      * @param privateKey Private key.
-     * @return Bytes with shared secret or null in case of failure.
+     * @return Derived shared secret or null in case of failure.
      */
-    public static native byte[] ecdhComputeSharedSecret(EcPublicKey publicKey, EcPrivateKey privateKey);
+    public static native SecureData ecdhComputeSharedSecret(@NonNull EcPublicKey publicKey, @NonNull EcPrivateKey privateKey);
 
     /**
      * Computes SHA-256 from given data.
@@ -85,7 +71,7 @@ public class CryptoUtils {
      * @param data bytes to be hashed
      * @return bytes with SHA-256 result
      */
-    public static native byte[] hashSha256(byte[] data);
+    public static native byte[] hashSha256(@Nullable byte[] data);
 
     /**
      * Computes SHA-256 from given data and resize the result required length.
@@ -126,4 +112,13 @@ public class CryptoUtils {
      */
     public static native byte[] randomBytes(int count);
 
+    /**
+     * Generate secure data initialized with random bytes.
+     * @param count number random bytes to generate.
+     * @return random secure data or {@code null} in case of broken random generator or if provided
+     *         count is negative.
+     */
+    public static SecureData randomSecureData(int count) {
+        return SecureData.capture(randomBytes(count));
+    }
 }

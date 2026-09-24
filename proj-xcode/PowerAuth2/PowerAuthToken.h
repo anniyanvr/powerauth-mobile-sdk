@@ -17,11 +17,11 @@
 // PA2_SHARED_SOURCE PowerAuth2ForWatch .
 // PA2_SHARED_SOURCE PowerAuth2ForExtensions .
 
-#import <PowerAuth2/PowerAuthMacros.h>
-#import <PowerAuth2/PowerAuthOperationTask.h>
+#import "PowerAuthMacros.h"
+#import "PowerAuthOperationTask.h"
+#import "PowerAuthHttpHeader.h"
 
 // Forward declarations...
-@class PowerAuthAuthorizationHttpHeader;
 @class PowerAuthAuthentication;
 @protocol PowerAuthTokenStore;
 
@@ -29,7 +29,7 @@
 #pragma mark - Token -
 
 /**
- The `PowerAuthToken` interface generates a token based authorization headers.
+ The `PowerAuthToken` interface generates a token based authentication headers.
  You have to use `PowerAuthTokenStore` to get an instance of this class.
  
  The whole interface is thread safe.
@@ -61,9 +61,9 @@
 @property (nonatomic, readonly) BOOL canGenerateHeader;
 
 /**
- Returns a new token-based authorization header or nil, if it's not possible to generate the header.
+ Returns a new token-based authentication header or nil, if it's not possible to generate the header.
  */
-- (nullable PowerAuthAuthorizationHttpHeader*) generateHeader;
+- (nullable PowerAuthHttpHeader*) generateHeader;
 
 /**
  Returns YES if both token objects are equal.
@@ -88,7 +88,7 @@
 - (BOOL) canRequestForAccessToken;
 
 /**
- Create a new access token with given name for requested signature factors. The created token objects
+ Create a new access token with given name for requested authentication factors. The created token objects
  always contains valid token data.
  
  Discussion
@@ -136,16 +136,6 @@
                                                        completion:(nonnull void(^)(BOOL removed, NSError * _Nullable error))completion;
 
 /**
- Cancels previously created store task. Note that cancelling may lead to inconsistent state,
- when the server will execute the operation but client application will not get the result.
- 
- It is safe to call this method with nil task.
- 
- This method is deprecated, because now you can call cancel directly on object returned from the asynchronous method.
- */
-- (void) cancelTask:(nullable id)task PA2_DEPRECATED(1.7.0);
-
-/**
  Removes token with given name from the local database. Be aware that this operation doesn't invalidate
  token on the server, it will only remove data associated to the token from the local database. It is recommended
  to use this method only as a fallback when online removal fails and you don't need to cary about existence
@@ -170,5 +160,23 @@
  Returns token object with given name if it's alreadu in local database or nil.
  */
 - (nullable PowerAuthToken*) localTokenWithName:(nonnull NSString*)name;
+
+/**
+ Generate authentication header with token with given name. Unlike `PowerAuthToken.generateHeader()`, this
+ asynchronous function guarantees that time used for the token digest calculation is always synchronized
+ with the server.
+ */
+- (nullable id<PowerAuthOperationTask>) generateAuthenticationHeaderWithName:(nonnull NSString *)name
+                                                                  completion:(nonnull void(^)(PowerAuthHttpHeader * _Nullable header, NSError * _Nullable error))completion;
+
+/**
+ Generate authentication header with token with given name. Unlike `PowerAuthToken.generateHeader()`, this
+ asynchronous function guarantees that time used for the token digest calculation is always synchronized
+ with the server.
+ @deprecated Please use `generateAuthenticationHeader(withName:completion:)` function instead.
+ */
+- (nullable id<PowerAuthOperationTask>) generateAuthorizationHeaderWithName:(nonnull NSString *)name
+                                                                 completion:(nonnull void(^)(PowerAuthAuthorizationHttpHeader * _Nullable header, NSError * _Nullable error))completion
+                                                                    PA2_DEPRECATED(2.0.0);
 
 @end

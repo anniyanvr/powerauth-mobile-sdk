@@ -16,6 +16,7 @@
 
 package io.getlime.security.powerauth.biometry.impl;
 
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Build;
@@ -32,18 +33,12 @@ import android.util.Pair;
 
 import javax.crypto.Cipher;
 
-import io.getlime.security.powerauth.biometry.BiometricAuthenticationRequest;
-import io.getlime.security.powerauth.biometry.BiometricDialogResources;
-import io.getlime.security.powerauth.biometry.BiometricKeyData;
-import io.getlime.security.powerauth.biometry.BiometricStatus;
-import io.getlime.security.powerauth.biometry.BiometryType;
-import io.getlime.security.powerauth.biometry.IBiometricKeyEncryptor;
-import io.getlime.security.powerauth.biometry.IBiometricKeystore;
+import io.getlime.security.powerauth.biometry.*;
+import io.getlime.security.powerauth.core.SecureData;
 import io.getlime.security.powerauth.exception.PowerAuthErrorCodes;
 import io.getlime.security.powerauth.exception.PowerAuthErrorException;
 import io.getlime.security.powerauth.networking.interfaces.ICancelable;
 import io.getlime.security.powerauth.sdk.impl.CancelableTask;
-import io.getlime.security.powerauth.sdk.impl.MainThreadExecutor;
 import io.getlime.security.powerauth.system.PowerAuthLog;
 
 /**
@@ -51,7 +46,6 @@ import io.getlime.security.powerauth.system.PowerAuthLog;
  * {@link BiometricPrompt} support library. This implementation is automatically used on devices with
  * Android 6.0 and newer.
  */
-@RequiresApi(api = Build.VERSION_CODES.M)
 public class BiometricAuthenticator implements IBiometricAuthenticator {
 
     private final @NonNull Context context;
@@ -127,10 +121,14 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
         final int status = biometricManager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
         switch (status) {
             case BiometricManager.BIOMETRIC_SUCCESS:
-                return BiometricStatus.OK;
+                // Take KeyguardManager's state into account. If device is secured and is not locker right now,
+                // then return OK, otherwise NO_AVAILABLE. It makes no sense to try to authenticate with
+                // the biometry if the device is locked or is not secured.
+                return isDeviceSecuredAndUnlocked() ? BiometricStatus.OK : BiometricStatus.NOT_AVAILABLE;
 
             case BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE:
             case BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED:
+            case BiometricManager.BIOMETRIC_ERROR_IDENTITY_CHECK_NOT_ACTIVE:
                 return BiometricStatus.NOT_AVAILABLE;
 
             case BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED:
@@ -163,11 +161,7 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
 
         // Now construct appropriate cipher with the biometric key, wrapped in the crypto object.
         final IBiometricKeyEncryptor encryptor = requestData.getBiometricKeyEncryptorProvider().getBiometricKeyEncryptor();
-        final BiometricPrompt.CryptoObject cryptoObject = wrapCipherToCryptoObject(encryptor.initializeCipher(request.isForceGenerateNewKey()));
-        if (cryptoObject == null) {
-            throw new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_SUPPORTED, "Cannot create CryptoObject for biometric authentication.");
-        }
-
+        final BiometricPrompt.CryptoObject cryptoObject = encryptor.initializeCryptoObject(request.isForceGenerateNewKey());
         final BiometricDialogResources resources = requestData.getResources();
 
         // Build BiometricPrompt with title & description
@@ -184,8 +178,36 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
         builder.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG);
         builder.setConfirmationRequired(request.isUserConfirmationRequired());
 
+        // Build prompt's callback
+        final BiometricPrompt.AuthenticationCallback authenticationCallback = buildAuthenticationCallback(requestData, dispatcher);
+
+        // Build prompt
+        final BiometricPrompt prompt;
+        if (request.getFragment() != null) {
+            prompt = new BiometricPrompt(request.getFragment(), request.getBackgroundTaskExecutor(), authenticationCallback);
+        } else if (request.getFragmentActivity() != null) {
+            prompt = new BiometricPrompt(request.getFragmentActivity(), request.getBackgroundTaskExecutor(), authenticationCallback);
+        } else {
+            throw new PowerAuthErrorException(PowerAuthErrorCodes.WRONG_PARAMETER, "Neither a Fragment nor a FragmentActivity is set for the biometric prompt.");
+        }
+
+        // Authenticate with the prompt
+        prompt.authenticate(builder.build(), cryptoObject);
+        // Handle cancel from application
+        dispatcher.setOnCancelListener(prompt::cancelAuthentication);
+        // Return composite cancelable object, that can handle cancel on various stages of authentication.
+        return dispatcher.getCancelableTask();
+    }
+
+    /**
+     * Create biometric authentication callback.
+     * @param requestData Biometric request data.
+     * @param dispatcher Callback dispatcher.
+     * @return Biometric authentication callback.
+     */
+    private BiometricPrompt.AuthenticationCallback buildAuthenticationCallback(PrivateRequestData requestData, BiometricResultDispatcher dispatcher) {
         // Build authentication callback
-        final BiometricPrompt.AuthenticationCallback authenticationCallback = new BiometricPrompt.AuthenticationCallback() {
+        return new BiometricPrompt.AuthenticationCallback() {
             @Override
             public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
                 super.onAuthenticationError(errorCode, errString);
@@ -198,34 +220,58 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
                                          errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON;
                 final boolean isQuickCancel = isCancel && detectQuickCancelAfterFailure();
                 final boolean isLockout = errorCode == BiometricPrompt.ERROR_LOCKOUT || errorCode == BiometricPrompt.ERROR_LOCKOUT_PERMANENT;
+                final boolean notAvailable = errorCode == BiometricPrompt.ERROR_HW_NOT_PRESENT;
+                final boolean notEnrolled = errorCode == BiometricPrompt.ERROR_NO_BIOMETRICS;
                 if (isCancel && !isQuickCancel) {
                     // User pressed the cancel button, or authentication was canceled by the system.
                     // That may happen when user hit the power button and lock the device. We can
-                    // both situations report as an user initiated cancel.
+                    // both situations report as user initiated cancel.
                     dispatcher.dispatchUserCancel();
                 } else {
+                    // Build a proper exception with the reason of failure.
                     final PowerAuthErrorException exception;
+
+                    // Determine whether the error dialog should be displayed
+                    final boolean shouldDisplayError = shouldDisplayErrorDialog(requestData);
+                    // Error will be displayed only if it's not disabled globally.
+                    final boolean displayError = shouldDisplayError && !requestData.isErrorDialogDisabled();
+                    // Display hint to application whether error should be presented.
+                    final boolean displayHint = shouldDisplayError && requestData.isErrorDialogDisabled();
+
                     if (isLockout || isQuickCancel) {
                         if (authenticationFailedBefore > 0) {
                             // Too many failed attempts, we should report the "not recognized" error after all.
                             // If `authenticationFailedBefore` is greater than 0, then it means that sensor did a multiple failed attempts
                             // in this round. So we're pretty sure that biometric authentication dialog was properly displayed.
-                            exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_RECOGNIZED, "Biometric image was not recognized.");
+                            final BiometricErrorInfo info = new BiometricErrorInfo(PowerAuthErrorCodes.BIOMETRY_NOT_RECOGNIZED, displayHint, errString);
+                            exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_RECOGNIZED, "Biometric image was not recognized", null, info);
                         } else {
                             // Too many failed attempts, but no authentication dialog was displayed in this round. It looks like that
                             // the error was immediately reported back to us, so we can report "lockout" to the application.
-                            exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_LOCKOUT, "Too many failed attempts.");
+                            final BiometricErrorInfo info = new BiometricErrorInfo(PowerAuthErrorCodes.BIOMETRY_LOCKOUT, displayHint, errString);
+                            exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_LOCKOUT, "Too many failed attempts", null, info);
                         }
+                    } else if (notEnrolled) {
+                        // Biometry is not enrolled.
+                        final BiometricErrorInfo info = new BiometricErrorInfo(PowerAuthErrorCodes.BIOMETRY_NOT_ENROLLED, displayHint, errString);
+                        exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_ENROLLED, "Biometry not enrolled", null, info);
+                    } else if (notAvailable) {
+                        // Biometry is not supported
+                        final BiometricErrorInfo info = new BiometricErrorInfo(PowerAuthErrorCodes.BIOMETRY_NOT_SUPPORTED, displayHint, errString);
+                        exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_SUPPORTED, "Biometry not supported", null, info);
                     } else {
                         // Other error, we can use "not available" error code, due to that other
                         // errors are mostly about an internal failures.
-                        exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, errString.toString());
+                        final BiometricErrorInfo info = new BiometricErrorInfo(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, displayHint, errString);
+                        exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, errString.toString(), null, info);
                     }
-                    if (shouldDisplayErrorDialog(requestData)) {
-                        // The response from API was too quick. We should display our own UI.
-                        showBiometricErrorDialog(errString, exception, requestData);
+
+                    // Show error dialog first or dispatch the failure immediately.
+                    if (displayError) {
+                        // Display error dialog on main thread
+                        final CharSequence failure = errString;
+                        dispatcher.dispatchRunnable(() -> showBiometricErrorDialog(failure, exception, requestData));
                     } else {
-                        // Otherwise dispatch the error.
                         dispatcher.dispatchError(exception);
                     }
                 }
@@ -235,37 +281,38 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
             public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
                 super.onAuthenticationSucceeded(result);
                 biometricPromptIsProbablyVisible = true;
-                // Acquire cipher from the result. This is a bit over-paranoid, but lets check everything
-                // returned from the system.
-                final Cipher cipher;
-                if (result.getCryptoObject() != null) {
-                    cipher = result.getCryptoObject().getCipher();
-                } else {
-                    cipher = null;
-                }
-                if (cipher != null) {
-                    // Let's try to encrypt or decrypt the biometric key
-                    final BiometricKeyData biometricKeyData = encryptOrDecryptRawKeyData(requestData);
-                    if (biometricKeyData != null) {
-                        dispatcher.dispatchSuccess(biometricKeyData);
-                        return;
+                // Test whether CryptoObject is present in the result.
+                final BiometricPrompt.CryptoObject cryptoObject = result.getCryptoObject();
+                if (cryptoObject != null) {
+                    if (cryptoObject.getCipher() != null || cryptoObject.getMac() != null) {
+                        // Let's try to encrypt or decrypt the biometric key
+                        final BiometricKeyData biometricKeyData = encryptOrDecryptRawKeyData(requestData);
+                        if (biometricKeyData != null) {
+                            dispatcher.dispatchSuccess(biometricKeyData);
+                            return;
+                        }
+                        PowerAuthLog.e("Failed to encrypt biometric key.");
+                    } else {
+                        PowerAuthLog.e("Failed to get Cipher or Mac from CryptoObject.");
                     }
-                    PowerAuthLog.e("Failed to encrypt biometric key.");
                 } else {
-                    PowerAuthLog.e("Failed to get Cipher from CryptoObject.");
+                    PowerAuthLog.e("No CryptoObject returned after successful authentication.");
                 }
                 // If the code ends here, it mostly means that the vendor's implementation is quite off the standard.
                 // The device reports success, but we're unable to derive our cryptographic key, due to malfunction in cipher
                 // or due to fact, that the previously constructed cipher is not available. The right response for this state
                 // is to remove the biometric key from the keychain, show an error dialog and then, finally report "not available" state.
                 dispatcher.reportBiometricKeyUnavailable();
-                dispatcher.dispatchRunnable(new Runnable() {
-                    @Override
-                    public void run() {
-                        final PowerAuthErrorException exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, "Failed to encrypt biometric key.");
-                        showErrorDialogAfterSuccess(requestData, exception);
-                    }
-                });
+                // Prepare BiometricErrorInfo. If error dialog is disabled, then application should report this situation to the user.
+                final BiometricErrorInfo errorInfo = new BiometricErrorInfo(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, requestData.isErrorDialogDisabled());
+                final PowerAuthErrorException exception = new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, "Failed to encrypt biometric key.", null, errorInfo);
+                if (!requestData.isErrorDialogDisabled()) {
+                    // Display error dialog on main thread
+                    dispatcher.dispatchRunnable(() -> showErrorDialogAfterSuccess(requestData, exception));
+                } else {
+                    // Just report the failure
+                    dispatcher.dispatchError(exception);
+                }
             }
 
             @Override
@@ -275,39 +322,74 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
                 authenticationFailedBefore++;
                 authenticationFailedTimestamp = SystemClock.elapsedRealtime();
             }
-        };
 
-        // Build the prompt
-        final BiometricPrompt prompt;
-        if (request.getFragment() != null) {
-            prompt = new BiometricPrompt(request.getFragment(), MainThreadExecutor.getInstance(), authenticationCallback);
-        } else if (request.getFragmentActivity() != null) {
-            prompt = new BiometricPrompt(request.getFragmentActivity(), MainThreadExecutor.getInstance(), authenticationCallback);
-        } else {
-            throw new PowerAuthErrorException(PowerAuthErrorCodes.WRONG_PARAMETER, "Both Fragment and FragmentActivity for biometric prompt presentation are set.");
-        }
-        // Authenticate with the prompt
-        prompt.authenticate(builder.build(), cryptoObject);
-        // Handle cancel from application
-        dispatcher.setOnCancelListener(new CancelableTask.OnCancelListener() {
-            @Override
-            public void onCancel() {
-                prompt.cancelAuthentication();
+            /**
+             * Property is set to {@code true} in case that there's a high probability, that biometric prompt
+             * is visible on the screen.
+             */
+            private boolean biometricPromptIsProbablyVisible;
+
+            /**
+             * Minimum time in milliseconds that need BiometricPrompt to respond with the error.
+             * Check {@link #shouldDisplayErrorDialog(PrivateRequestData)} documentation for more details.
+             */
+            private static final long PROMPT_API_MIN_RESPONSE_TIME = 2000;
+
+            /**
+             * Tolerance time in milliseconds to {@link #PROMPT_API_MIN_RESPONSE_TIME}.
+             */
+            private static final long PROMPT_API_RESPONSE_TOLERANCE = 200;
+
+            /**
+             * Determine whether we need to display our own error UI. This is required due to fact, that on
+             * Android "P", we never knows whether the BiometricPrompt system UI was displayed or not.
+             * It's also impossible to determine this situation in advance, for example for lock down state.
+             * <p>
+             * So, the only option is to use this crappy hack with elapsed time...
+             *
+             * @param requestData Request data
+             * @return {@code true} when custom error dialog should be displayed.
+             */
+            private boolean shouldDisplayErrorDialog(@NonNull PrivateRequestData requestData) {
+                if (biometricPromptIsProbablyVisible) {
+                    // Looks like that some other callback was called before. That may indicate that dialog
+                    // UI was really visible.
+                    return false;
+                }
+                // Flipping this status guarantees that only one dialog will be displayed. This is prevention
+                // against possible two error reports in one authentication session.
+                biometricPromptIsProbablyVisible = true;
+
+                // Get elapsed time from the request data.
+                long elapsedTime = requestData.getElapsedTime();
+                if (elapsedTime < PROMPT_API_RESPONSE_TOLERANCE) {
+                    // We're under 200ms, so the response was really quick. In this case, we should display
+                    // our own dialog. This typically happens on Android 10s in case that biometry is
+                    // temporarily disabled for too many failed attempts.
+                    return true;
+                }
+                if (elapsedTime >= PROMPT_API_MIN_RESPONSE_TIME &&
+                        elapsedTime < PROMPT_API_MIN_RESPONSE_TIME + PROMPT_API_RESPONSE_TOLERANCE) {
+                    // The response time is between 2000 and 2200ms.
+                    // This is required due to a bug in BiometricPrompt on Android "P", where the error is always
+                    // reported after 2000ms, even if no prompt UI was visible.
+                    return true;
+                }
+                // Looks like that BiometricPrompt UI was really visible, so we don't need to display
+                // our own dialog with error message.
+                return false;
             }
-        });
-        // Return composite cancelable object, that can handle cancel on various stages of authentication.
-        return dispatcher.getCancelableTask();
+        };
     }
 
     /**
-     * Wrap {@link Cipher} into {@link BiometricPrompt.CryptoObject}.
-     *
-     * @param cipher A cipher object that must be wrapped.
-     * @return {@link BiometricPrompt.CryptoObject} created for given cipher.
+     * Determine whether device is secured (e.g. user has unlock PIN, password or pattern set) and
+     * is not locked right now. The function is using {@link KeyguardManager} internally.
+     * @return {@code true} if device is secured and is not locked right now.
      */
-    private @Nullable BiometricPrompt.CryptoObject wrapCipherToCryptoObject(@Nullable Cipher cipher) {
-        // Wrap cipher into required crypto object
-        return cipher != null ? new BiometricPrompt.CryptoObject(cipher) : null;
+    private boolean isDeviceSecuredAndUnlocked() {
+        final KeyguardManager keyguardManager = context.getSystemService(KeyguardManager.class);
+        return keyguardManager.isDeviceSecure() && !keyguardManager.isDeviceLocked();
     }
 
     /**
@@ -323,7 +405,7 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
                 hasAlreadyProcessedBiometricKeyData = true;
                 try {
                     // Let's try to encrypt or decrypt the biometric key
-                    final byte[] rawKeyData = request.getRawKeyData();
+                    final SecureData rawKeyData = request.getRawKeyData();
                     final IBiometricKeyEncryptor encryptor = requestData.getBiometricKeyEncryptorProvider().getBiometricKeyEncryptor();
                     if (request.isForceGenerateNewKey()) {
                         processedBiometricKeyData = encryptor.encryptBiometricKey(rawKeyData);
@@ -336,63 +418,6 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
             }
             return processedBiometricKeyData;
         }
-    }
-
-    /**
-     * Property is set to {@code true} in case that there's a high probability, that biometric prompt
-     * is visible on the screen.
-     */
-    private boolean biometricPromptIsProbablyVisible;
-
-    /**
-     * Minimum time in milliseconds that need BiometricPrompt to respond with the error.
-     * Check {@link #shouldDisplayErrorDialog(PrivateRequestData)} documentation for more details.
-     */
-    private static final long PROMPT_API_MIN_RESPONSE_TIME = 2000;
-
-    /**
-     * Tolerance time in milliseconds to {@link #PROMPT_API_MIN_RESPONSE_TIME}.
-     */
-    private static final long PROMPT_API_RESPONSE_TOLERANCE = 200;
-
-    /**
-     * Determine whether we need to display our own error UI. This is required due to fact, that on
-     * Android "P", we never knows whether the BiometricPrompt system UI was displayed or not.
-     * It's also impossible to determine this situation in advance, for example for lock down state.
-     *
-     * So, the only option is to use this crappy hack with elapsed time...
-     *
-     * @param requestData Request data
-     * @return {@code true} when custom error dialog should be displayed.
-     */
-    private boolean shouldDisplayErrorDialog(@NonNull PrivateRequestData requestData) {
-        if (biometricPromptIsProbablyVisible) {
-            // Looks like that some other callback was called before. That may indicate that dialog
-            // UI was really visible.
-            return false;
-        }
-        // Flipping this status guarantees that only one dialog will be displayed. This is prevention
-        // against possible two error reports in one authentication session.
-        biometricPromptIsProbablyVisible = true;
-
-        // Get elapsed time from the request data.
-        long elapsedTime = requestData.getElapsedTime();
-        if (elapsedTime < PROMPT_API_RESPONSE_TOLERANCE) {
-            // We're under 200ms, so the response was really quick. In this case, we should display
-            // our own dialog. This typically happens on Android 10s in case that biometry is
-            // temporarily disabled for too many failed attempts.
-            return true;
-        }
-        if (elapsedTime >= PROMPT_API_MIN_RESPONSE_TIME &&
-                elapsedTime < PROMPT_API_MIN_RESPONSE_TIME + PROMPT_API_RESPONSE_TOLERANCE) {
-            // The response time is between 2000 and 2200ms.
-            // This is required due to a bug in BiometricPrompt on Android "P", where the error is always
-            // reported after 2000ms, even if no prompt UI was visible.
-            return true;
-        }
-        // Looks like that BiometricPrompt UI was really visible, so we don't need to display
-        // our own dialog with error message.
-        return false;
     }
 
     /**
@@ -434,7 +459,7 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
                 dialogFragment.dismiss();
             }
         });
-        dialogFragment.show(fragmentManager, BiometricErrorDialogFragment.FRAGMENT_DEFAULT_TAG);
+        DialogFragmentUtil.showDialogAllowingStateLoss(dialogFragment, fragmentManager, BiometricErrorDialogFragment.FRAGMENT_DEFAULT_TAG);
     }
 
     /**
@@ -470,7 +495,7 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
         }
 
         final BiometricDialogResources resources = requestData.getResources();
-        final Pair<Integer, Integer> titleDescription = BiometricHelper.getErrorDialogStringsForBiometricStatus(BiometricStatus.NOT_AVAILABLE, resources);
+        final Pair<Integer, Integer> titleDescription = BiometricHelper.getErrorDialogStringsForBiometricStatus(BiometricStatus.NOT_AVAILABLE, resources.strings);
         final FragmentManager fragmentManager = requestData.getFragmentManager();
 
         final BiometricErrorDialogFragment dialogFragment = new BiometricErrorDialogFragment.Builder(context)
@@ -494,7 +519,7 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
         });
 
         // Show fragment
-        dialogFragment.show(fragmentManager, BiometricErrorDialogFragment.FRAGMENT_DEFAULT_TAG);
+        DialogFragmentUtil.showDialogAllowingStateLoss(dialogFragment, fragmentManager, BiometricErrorDialogFragment.FRAGMENT_DEFAULT_TAG);
     }
 
     /**
@@ -515,8 +540,8 @@ public class BiometricAuthenticator implements IBiometricAuthenticator {
      * Function determines whether user is trying to trick the sensor by quick pressing cancel
      * after last failure. The functionality is available only on devices older than Android 9,
      * where BiometricPrompt is implemented by `androidx.biometric` support library.
-     *
-     * See issue: https://github.com/wultra/powerauth-mobile-sdk/issues/422
+     * <p>
+     * See issue: <a href="https://github.com/wultra/powerauth-mobile-sdk/issues/422">wultra/powerauth-mobile-sdk#422</a>
      * @return true if quick cancel after failure is detected.
      */
     private boolean detectQuickCancelAfterFailure() {

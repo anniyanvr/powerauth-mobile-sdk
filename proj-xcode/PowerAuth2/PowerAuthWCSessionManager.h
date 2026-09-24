@@ -16,7 +16,7 @@
 
 // PA2_SHARED_SOURCE PowerAuth2ForWatch .
 
-#import <PowerAuth2/PowerAuthMacros.h>
+#import "PowerAuthMacros.h"
 
 // -----------------------------------------------------------------------
 #if defined(PA2_WATCH_SUPPORT)
@@ -49,11 +49,11 @@
  Processes a received message data and returns YES if message has been consumed (e.g. PowerAuth
  is the data recipient), NO otherwise. If YES is returned and the replyHandler is available, then the handler
  is called with a valid reply data. The replyHandler nullability must match behavior of the message. That means
- that if WCSessionDelegate method is called with a valid reply handler (e.g. counterpart is expecing response),
+ that if WCSessionDelegate method is called with a valid reply handler (e.g. counterpart is expecting response),
  then you have to always provide the reply handler to this method.
  */
 - (BOOL) processReceivedMessageData:(nonnull NSData *)data
-                       replyHandler:(void (^ _Nullable)(NSData * _Nonnull reply))replyHandler;
+                       replyHandler:(void (^_Nullable)(NSData * _Nonnull reply))replyHandler;
 
 /**
  Processes a received user info and returns YES if information has been consumed (e.g. PowerAuth

@@ -15,518 +15,982 @@
  */
 
 #include <PowerAuth/Session.h>
-#include <PowerAuth/Debug.h>
 
 #import <PowerAuthCore/PowerAuthCoreSession.h>
 #import <PowerAuthCore/PowerAuthCoreMacros.h>
 #import "PowerAuthCorePrivateImpl.h"
 
-using namespace io::getlime::powerAuth;
-
-#if defined(DEBUG)
-#define REQUIRE_WRITE_ACCESS()          [_debugMonitor requireWriteAccess]
-#define REQUIRE_READ_ACCESS()           [_debugMonitor requireReadAccess]
-#define REPORT_ERROR_CODE(fname, ec)    if (ec != EC_Ok) {                                                                  \
-                                            PowerAuthCoreObjc_DebugDumpError(self, fname, ec);                              \
-                                            [_debugMonitor reportErrorCode:(PowerAuthCoreErrorCode)ec forOperation:fname];  \
-                                        }
-#else
-#define REQUIRE_WRITE_ACCESS()
-#define REQUIRE_READ_ACCESS()
-#define REPORT_ERROR_CODE(fname, ec)
-#endif
+using namespace cc7;
+using namespace powerAuth;
 
 @implementation PowerAuthCoreSession
 {
-    Session *   _session;
+    SessionPtr _session;
+    BOOL _hasDelegate;
+    __weak id<PowerAuthCoreSessionDelegate> _delegate;
 }
 
 #pragma mark - Initialization / Reset
 
-- (nullable instancetype) initWithSessionSetup:(nonnull PowerAuthCoreSessionSetup *)setup
+- (instancetype) initWithSession:(SessionPtr)session
+                   configuration:(PowerAuthCoreConfig*)configuration
+                        delegate:(id<PowerAuthCoreSessionDelegate>)delegate
 {
     self = [super init];
     if (self) {
-        SessionSetup cpp_setup;
-        PowerAuthCoreSessionSetupToStruct(setup, cpp_setup);
-        _session = new Session(cpp_setup);
-        if (!_session) {
-            // This is a low memory issue. Returning nil we guarantee that swift/objc
-            // will not use this unitialized instance at all.
-            return nil;
-        }
+        _configuration = configuration;
+        _session = session;
+        _delegate = delegate;
+        _hasDelegate = delegate != nil;
+        _timeSynchronizationService = [[PowerAuthCoreTimeService alloc] initWithService:_session->getTimeService()];
     }
     return self;
 }
 
-- (nullable instancetype) init
++ (nullable instancetype) createWithConfiguration:(nonnull PowerAuthCoreConfig*)configuration
+                                         delegate:(nullable id<PowerAuthCoreSessionDelegate>)delegate
+                                            error:(NSError*_Nullable*_Nullable)error
 {
-    // Simple object init should always return nil
-    return nil;
+    try {
+        auto session = Session::createInstance(configuration.configurationRef);
+        return [[PowerAuthCoreSession alloc] initWithSession:session
+                                               configuration:configuration
+                                                    delegate:delegate];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
 }
 
-- (void) dealloc
++ (nullable instancetype) createWithConfiguration:(nonnull PowerAuthCoreConfig*)configuration
+                                            error:(NSError*_Nullable*_Nullable)error
 {
-    delete _session;
+    return [self createWithConfiguration:configuration delegate:nil error:error];
 }
 
 - (void) resetSession
 {
-    REQUIRE_WRITE_ACCESS();
-    _session->resetSession();
+    [self requireWriteAccess:nil];
+    try {
+        _session->resetState();
+    } catch (...) {
+        // TODO: log failure
+    }
 }
 
-
-+ (BOOL) hasDebugFeatures
+- (id<PowerAuthCoreSessionDelegate>) delegate
 {
-    BOOL debug_features = io::getlime::powerAuth::HasDebugFeaturesTurnedOn();
-#if defined(ENABLE_POWERAUTH_CORE_LOG) || defined(DEBUG)
-    debug_features |= YES;
-#endif
-    return debug_features;
+    return _delegate;
 }
 
+- (void) setDelegate:(id<PowerAuthCoreSessionDelegate>)delegate
+{
+    _delegate = delegate;
+    _hasDelegate = delegate != nil;
+}
+
+#pragma mark - Helpers
+
+/// Convert ObjC NSDictionary with NSString key and value into `std::map<std::string, std::string>` type.
+/// - Parameters:
+///   - dict: Input dictionary.
+///   - out_map: Reference to output map.
+/// - Returns: YES if success.
+static BOOL _ConvertDictToMap(NSDictionary<NSString*, NSString*>* dict, std::map<std::string, std::string>& out_map)
+{
+    __block std::map<std::string, std::string> map;
+    __block BOOL failure = NO;
+    [dict enumerateKeysAndObjectsUsingBlock:^(NSString * key, NSString * value, BOOL * stop) {
+        if (![key isKindOfClass:[NSString class]] || ![value isKindOfClass:[NSString class]]) {
+            *stop = failure = YES;
+            return;
+        }
+        map[objc::CopyFromNSString(key)] = objc::CopyFromNSString(value);
+    }];
+    if (!failure) {
+        out_map = std::move(map);
+    }
+    return !failure;
+}
+
+/// Convert ObjC NSArray with NSString values into `std::vector<std::string>` type.
+/// - Parameters:
+///   - array: Input array.
+///   - out_vector: Reference to output vector.
+/// - Returns: YES if success.
+static BOOL _ConvertArrayToVector(NSArray<NSString*>* array, std::vector<std::string>& out_vector)
+{
+    __block std::vector<std::string> vector;
+    __block BOOL failure = NO;
+    vector.reserve(array.count);
+    [array enumerateObjectsUsingBlock:^(NSString * obj, NSUInteger idx, BOOL * stop) {
+        if (![obj isKindOfClass:[NSString class]]) {
+            *stop = failure = YES;
+            return;
+        }
+        vector.push_back(objc::CopyFromNSString(obj));
+    }];
+    
+    if (!failure) {
+        out_vector = std::move(vector);
+    }
+    return !failure;
+}
+
+
+#pragma mark - Read / Write access
+
+static void _ReportError(PowerAuthCoreError code, NSString * message, NSError ** outError)
+{
+    if (outError) {
+        *outError = powerAuth::BuildCoreNSError(code, message);
+    } else {
+        PowerAuthCoreLog(@"ERROR: %@", message);
+    }
+}
+                        
+- (BOOL) requireReadAccess:(NSError**)error
+{
+    id<PowerAuthCoreSessionDelegate> delegate = _delegate;
+    if (delegate) {
+        if (![delegate requireReadAccess]) {
+            _ReportError(PowerAuthCoreError_InternalError,
+                         [NSString stringWithFormat:@"Read access not granted for session data. Instance: %@", _configuration.instanceId],
+                         error);
+            return NO;
+        }
+    } else if (_hasDelegate) {
+        _ReportError(PowerAuthCoreError_InternalError,
+                     [NSString stringWithFormat:@"PowerAuthCoreSessionDelegate is no longer valid. Instance: %@", _configuration.instanceId],
+                     error);
+        return NO;
+    }
+    return YES;
+}
+
+- (BOOL) requireWriteAccess:(NSError**)error
+{
+    id<PowerAuthCoreSessionDelegate> delegate = _delegate;
+    if (delegate) {
+        if (![delegate requireWriteAccess]) {
+            _ReportError(PowerAuthCoreError_InternalError,
+                         [NSString stringWithFormat:@"Write access not granted for session data. Instance: %@", _configuration.instanceId],
+                         error);
+            return NO;
+        }
+    } else if (_hasDelegate) {
+        _ReportError(PowerAuthCoreError_InternalError,
+                     [NSString stringWithFormat:@"PowerAuthCoreSessionDelegate is no longer valid. Instance: %@", _configuration.instanceId],
+                     error);
+        return NO;
+    }
+    return YES;
+}
 
 #pragma mark - Read only getters
 
-- (PowerAuthCoreSessionSetup*) sessionSetup
+- (NSString*) applicationKey
 {
-    const SessionSetup * cpp_setup = _session->sessionSetup();
-    if (cpp_setup) {
-        return PowerAuthCoreSessionSetupToObject(*cpp_setup);
-    }
-    return nil;
+    return cc7::objc::CopyToNSString(_session->getConfiguration()->applicationKey());
 }
 
-- (UInt32) sessionIdentifier
+- (NSString*) instanceId
 {
-    return _session->sessionIdentifier();
+    return cc7::objc::CopyToNSString(_session->getConfiguration()->instanceId());
 }
 
-- (BOOL) hasValidSetup
+- (PowerAuthCoreAlgorithm) currentAlgorithm
 {
-    return _session->hasValidSetup();
+    [self requireReadAccess:nil];
+    return static_cast<PowerAuthCoreAlgorithm>(_session->getPowerAuthSpec()->algorithm());
 }
 
-- (BOOL) canStartActivation
+- (BOOL) canCreateActivation
 {
-    REQUIRE_READ_ACCESS();
-    return _session->canStartActivation();
+    [self requireReadAccess:nil];
+    return _session->canCreateActivation();
 }
 
-- (BOOL) hasPendingActivation
+- (BOOL) hasPendingCreateActivation
 {
-    REQUIRE_READ_ACCESS();
-    return _session->hasPendingActivation();
+    [self requireReadAccess:nil];
+    return _session->hasPendingCreateActivation();
 }
 
-- (BOOL) hasValidActivation
+- (BOOL) hasValidActivationData
 {
-    REQUIRE_READ_ACCESS();
-    return _session->hasValidActivation();
+    [self requireReadAccess:nil];
+    return _session->hasValidActivationData();
 }
 
 - (BOOL) hasProtocolUpgradeAvailable
 {
-    REQUIRE_READ_ACCESS();
+    [self requireReadAccess:nil];
     return _session->hasProtocolUpgradeAvailable();
 }
 
 - (BOOL) hasPendingProtocolUpgrade
 {
-    REQUIRE_READ_ACCESS();
+    [self requireReadAccess:nil];
     return _session->hasPendingProtocolUpgrade();
 }
 
 - (PowerAuthCoreProtocolVersion) protocolVersion
 {
-    REQUIRE_READ_ACCESS();
-    return (PowerAuthCoreProtocolVersion) _session->protocolVersion();
+    [self requireReadAccess:nil];
+    return (PowerAuthCoreProtocolVersion) _session->getProtocolVersion();
+}
+
+- (nullable NSDictionary<NSString*, NSObject*>*) lastUserInfo
+{
+    [self requireReadAccess:nil];
+    return cc7::objc::JsonValueToObjC(_session->lastUserInfo());
+}
+
+- (nullable PowerAuthCoreActivationStatus*) lastActivationStatus
+{
+    [self requireReadAccess:nil];
+    
+    const auto status = _session->lastActivationStatus();
+    if (!status) {
+        return nil;
+    }
+    
+    return [[PowerAuthCoreActivationStatus alloc] initWithActivationStatus:status];
 }
 
 #pragma mark - Serialization
 
-- (nonnull NSData*) serializedState
+- (nullable NSData*) serializedState:(NSError*_Nullable*_Nullable)error
 {
-    REQUIRE_READ_ACCESS();
-    return cc7::objc::CopyToNSData(_session->saveSessionState());
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        return cc7::objc::CopyToNSData(_session->saveState());
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
 }
 
 
 - (BOOL) deserializeState:(nonnull NSData *)state
+                    error:(NSError*_Nullable*_Nullable)error
 {
-    REQUIRE_WRITE_ACCESS();
-    auto error = _session->loadSessionState(cc7::ByteRange(state.bytes, state.length));
-    REPORT_ERROR_CODE(@"DeserializeState", error);
-    return error == EC_Ok;
+    if (![self requireWriteAccess:error]) {
+        return NO;
+    }
+    try {
+        _session->loadState(ByteRange(state.bytes, state.length));
+        return YES;
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return NO;
+    }
 }
 
-
+- (BOOL) isModifiedState
+{
+    if (![self requireReadAccess:nil]) {
+        // TODO: log failure
+        return YES;
+    }
+    return _session->isModifiedState();
+}
 
 #pragma mark - Activation
 
 - (nullable NSString*) activationIdentifier
 {
-    REQUIRE_READ_ACCESS();
-    return cc7::objc::CopyToNullableNSString(_session->activationIdentifier());
+    [self requireReadAccess:nil];
+    return cc7::objc::CopyToNullableNSString(_session->activationId());
 }
 
 - (nullable NSString*) activationFingerprint
 {
-    REQUIRE_READ_ACCESS();
+    [self requireReadAccess:nil];
     return cc7::objc::CopyToNullableNSString(_session->activationFingerprint());
 }
 
-- (nullable PowerAuthCoreActivationStep1Result*) startActivation:(nonnull PowerAuthCoreActivationStep1Param*)param
+- (nullable PowerAuthCoreRequest*) createActivation:(nonnull NSDictionary*)L1Data
+                                         withL2Data:(nonnull NSDictionary*)L2Data
+                                              error:(NSError*_Nullable*_Nullable)error
 {
-    REQUIRE_WRITE_ACCESS();
-    ActivationStep1Param cpp_p1;
-    ActivationStep1Result cpp_r1;
-    PowerAuthCoreActivationStep1ParamToStruct(param, cpp_p1);
-    auto error = _session->startActivation(cpp_p1, cpp_r1);
-    if (error == EC_Ok) {
-        return PowerAuthCoreActivationStep1ResultToObject(cpp_r1);
-    }
-    REPORT_ERROR_CODE(@"StartActivation", error);
-    return nil;
-}
-
-
-- (nullable PowerAuthCoreActivationStep2Result*) validateActivationResponse:(nonnull PowerAuthCoreActivationStep2Param*)param
-{
-    REQUIRE_WRITE_ACCESS();
-    ActivationStep2Param cpp_p2;
-    ActivationStep2Result cpp_r2;
-    PowerAuthCoreActivationStep2ParamToStruct(param, cpp_p2);
-    auto error = _session->validateActivationResponse(cpp_p2, cpp_r2);
-    if (error == EC_Ok) {
-        return PowerAuthCoreActivationStep2ResultToObject(cpp_r2);
-    }
-    REPORT_ERROR_CODE(@"ValidateActivation", error);
-    return nil;
-}
-
-
-- (BOOL) completeActivation:(nonnull PowerAuthCoreSignatureUnlockKeys*)keys
-{
-    REQUIRE_WRITE_ACCESS();
-    SignatureUnlockKeys cpp_keys;
-    PowerAuthCoreSignatureUnlockKeysToStruct(keys, cpp_keys);
-    auto error = _session->completeActivation(cpp_keys);
-    REPORT_ERROR_CODE(@"CompleteActivation", error);
-    return error == EC_Ok;
-}
-
-
-
-#pragma mark - Activation status
-
-- (nullable PowerAuthCoreActivationStatus*) decodeActivationStatus:(nonnull PowerAuthCoreEncryptedActivationStatus *)encryptedStatus
-                                                              keys:(nonnull PowerAuthCoreSignatureUnlockKeys*)unlockKeys
-{
-    REQUIRE_READ_ACCESS();
-    EncryptedActivationStatus cpp_encrypted_status;
-    SignatureUnlockKeys cpp_keys;
-    ActivationStatus cpp_status;
-    PowerAuthCoreEncryptedActivationStatusToStruct(encryptedStatus, cpp_encrypted_status);
-    PowerAuthCoreSignatureUnlockKeysToStruct(unlockKeys, cpp_keys);
-    auto error = _session->decodeActivationStatus(cpp_encrypted_status, cpp_keys, cpp_status);
-    if (error == EC_Ok) {
-        return PowerAuthCoreActivationStatusToObject(cpp_status);
-    }
-    REPORT_ERROR_CODE(@"DecodeActivationStatus", error);
-    return nil;
-}
-
-
-
-#pragma mark - Data signing
-
-+ (nullable NSData*) prepareKeyValueDictionaryForDataSigning:(nonnull NSDictionary<NSString*, NSString*>*)dictionary
-{
-    __block std::map<std::string, std::string> map;
-    __block BOOL error = NO;
-    [dictionary enumerateKeysAndObjectsUsingBlock:^(NSString * key, NSString * value, BOOL * stop) {
-        if (![key isKindOfClass:[NSString class]] || ![value isKindOfClass:[NSString class]]) {
-            CC7_ASSERT(false, "Wrong type of object or key in provided NSDictionary.");
-            *stop = error = YES;
-            return;
-        }
-        map[std::string(key.UTF8String)] = std::string(value.UTF8String);
-    }];
-    if (error) {
+    if (![self requireWriteAccess:error]) {
         return nil;
     }
-    cc7::ByteArray normalized_data = Session::prepareKeyValueMapForDataSigning(map);
-    return cc7::objc::CopyToNSData(normalized_data);
+    try {
+        auto L1 = objc::JsonValueFromObjC(L1Data);
+        auto L2 = objc::JsonValueFromObjC(L2Data);
+        auto request = _session->createActivation(L1, L2);
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto result = std::dynamic_pointer_cast<powerAuth::ActivationResult>(response);
+            if (!result) {
+                throw Exception(EC_InternalError, "No ActivationResult object created");
+            }
+            return [[PowerAuthCoreActivationResult alloc] initWithActivationResult:*result];
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
 }
 
-
-- (nullable PowerAuthCoreHTTPRequestDataSignature*) signHttpRequestData:(nonnull PowerAuthCoreHTTPRequestData*)requestData
-                                                                   keys:(nonnull PowerAuthCoreSignatureUnlockKeys*)unlockKeys
-                                                                 factor:(PowerAuthCoreSignatureFactor)factor
+- (nullable PowerAuthCoreTask*) confirmActivationWithPassword:(nonnull PowerAuthCorePass*)password
+                                              withBiometryKek:(nullable PowerAuthCoreData*)biometryKek
+                                                        error:(NSError*_Nullable*_Nullable)error
 {
-    REQUIRE_WRITE_ACCESS();
-    HTTPRequestData request;
-    PowerAuthCoreHTTPRequestDataToStruct(requestData, request);
-    SignatureFactor cpp_factor  = static_cast<SignatureFactor>(factor);
-    SignatureUnlockKeys cpp_keys;
-    PowerAuthCoreSignatureUnlockKeysToStruct(unlockKeys, cpp_keys);
-    
-    PowerAuthCoreHTTPRequestDataSignature * signature = [[PowerAuthCoreHTTPRequestDataSignature alloc] init];
-    auto error = _session->signHTTPRequestData(request, cpp_keys, cpp_factor, [signature signatureStructRef]);
-    if (error == EC_Ok) {
-        return signature;
+    if (![self requireWriteAccess:error]) {
+        return nil;
     }
-    REPORT_ERROR_CODE(@"SignHttpRequestData", error);
+    try {
+        auto biometry = biometryKek ? biometryKek.byteArrayRef : ByteRange();
+        auto credentials = InitialCredentials::credentials(password.passObjRef->passwordData(), biometry);
+        auto task = _session->confirmActivation(credentials);
+        if (task) {
+            return [[PowerAuthCoreTask alloc] initWithTask:task];
+        }
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
     return nil;
 }
 
-
-- (NSString*) httpAuthHeaderName
+- (nullable PowerAuthCoreTask*) fetchActivationStatus:(NSError*_Nullable*_Nullable)error
 {
-    return cc7::objc::CopyToNSString(_session->httpAuthHeaderName());
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto task = _session->fetchActivationStatus();
+        return [[PowerAuthCoreTask alloc] initWithTask:task withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto status = std::dynamic_pointer_cast<powerAuth::ActivationStatus>(response);
+            if (!status) {
+                throw Exception(EC_InternalError, "No ActivationStatus object created");
+            }
+            return [[PowerAuthCoreActivationStatus alloc] initWithActivationStatus:status];
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
+- (nullable PowerAuthCoreTask*) startProtocolUpgradeWithPassword:(nullable PowerAuthCorePass*)password
+                                                 withBiometryKek:(nullable PowerAuthCoreData*)biometryKek
+                                                           error:(NSError*_Nullable*_Nullable)error;
+{
+    if (![self requireWriteAccess:error]) {
+        return nil;
+    }
+    try {
+        auto task = _session->startProtocolUpgrade(password ? password.passObjRef : nil, biometryKek ? biometryKek.byteArrayRef : cc7::ByteRange());
+        return [[PowerAuthCoreTask alloc] initWithTask:task withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto result = std::dynamic_pointer_cast<powerAuth::ProtocolUpgradeResult>(response);
+            if (!result) {
+                throw Exception(EC_InternalError, "No ProtocolUpgradeResult object created");
+            }
+            
+            return [[PowerAuthCoreProtocolUpgradeResult alloc] initWithProtocolUpgradeResult:*result];
+        }];
+        
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
+- (nullable PowerAuthCoreRequest*) removeActivationWithCredentials:(nonnull PowerAuthCoreCredentials*)credentials
+                                                             error:(NSError * _Nullable __autoreleasing * _Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto request = _session->removeActivation(credentials.credentialsRef);
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
+- (nullable PowerAuthCoreRequest*) renameActivationWithCredentials:(nonnull PowerAuthCoreCredentials*)credentials
+                                                              name:(nonnull NSString*)activationName
+                                                             error:(NSError * _Nullable __autoreleasing * _Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto request = _session->renameActivation(credentials.credentialsRef, objc::CopyFromNSString(activationName));
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto result = std::dynamic_pointer_cast<powerAuth::StringResponse>(response);
+            if (!result) {
+                throw Exception(EC_InternalError, "No StringResponse object created");
+            }
+            return cc7::objc::CopyToNSString(result->string());
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
 }
 
 
-- (BOOL) verifyServerSignedData:(nonnull PowerAuthCoreSignedData*)signedData
+#pragma mark - User info
+
+- (nullable PowerAuthCoreRequest*) fetchUserInfo:(NSError*_Nullable*_Nullable)error
 {
-    REQUIRE_READ_ACCESS();
-    ErrorCode error;
-    if (signedData != nil) {
-        error = _session->verifyServerSignedData(signedData.signedDataRef);
-    } else {
-        error = EC_WrongParam;
+    if (![self requireWriteAccess:error]) {
+        return nil;
     }
-    REPORT_ERROR_CODE(@"VerifyServerSignedData", error);
-    return error == EC_Ok;
+    
+    try {
+        auto request = _session->fetchUserInfo();
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
 }
 
 
 #pragma mark - Signature keys management
 
-- (BOOL) changeUserPassword:(nonnull PowerAuthCorePassword *)old_password newPassword:(nonnull PowerAuthCorePassword*)new_password
+- (nullable PowerAuthCoreRequest*) verifyPassword:(nonnull PowerAuthCorePass*)password
+                                            error:(NSError*_Nullable*_Nullable)error
 {
-    REQUIRE_WRITE_ACCESS();
-    ErrorCode error;
-    if (old_password != nil && new_password != nil) {
-        error = _session->changeUserPassword([old_password passObjRef].passwordData(), [new_password passObjRef].passwordData());
-    } else {
-        error = EC_WrongParam;
+    try {
+        auto request = _session->verifyPassword(password.passObjRef);
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
     }
-    REPORT_ERROR_CODE(@"ChangeUserPassword", error);
-    return error == EC_Ok;
 }
 
-- (BOOL) addBiometryFactor:(nonnull NSString *)cVaultKey
-                      keys:(nonnull PowerAuthCoreSignatureUnlockKeys*)unlockKeys
+- (nullable PowerAuthCoreRequest*) changePassword:(nonnull PowerAuthCorePass*)oldPassword
+                                       toPassword:(nonnull PowerAuthCorePass*)newPassword
+                                            error:(NSError*_Nullable*_Nullable)error
 {
-    REQUIRE_WRITE_ACCESS();
-    std::string cpp_c_vault_key = cc7::objc::CopyFromNSString(cVaultKey);
-    SignatureUnlockKeys cpp_keys;
-    PowerAuthCoreSignatureUnlockKeysToStruct(unlockKeys, cpp_keys);
-    auto error = _session->addBiometryFactor(cpp_c_vault_key, cpp_keys);
-    REPORT_ERROR_CODE(@"AddBiometryFactor", error);
-    return error == EC_Ok;
+    try {
+        auto request = _session->changePassword(oldPassword.passObjRef, newPassword.passObjRef);
+        if (request) {
+            return [[PowerAuthCoreRequest alloc] initWithRequest:request];
+        }
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
 }
 
 - (BOOL) hasBiometryFactor
 {
-    REQUIRE_READ_ACCESS();
-    bool result;
-    CC7_UNUSED_VAR auto error = _session->hasBiometryFactor(result);
-    REPORT_ERROR_CODE(@"HasBiometryFactor", error);
-    return result;
+    if (![self requireReadAccess:nil]) {
+        return NO;
+    }
+    try {
+        return _session->hasBiometricFactor();
+    } catch (...) {
+        // TODO: log exception
+        return NO;
+    }
 }
 
-- (BOOL) removeBiometryFactor
+- (nullable PowerAuthCoreRequest*) addBiometryFactorWithPassword:(nonnull PowerAuthCorePass*)password
+                                                 withBiometryKek:(nonnull PowerAuthCoreData *)biometryKek
+                                                           error:(NSError **)error
 {
-    REQUIRE_WRITE_ACCESS();
-    auto error = _session->removeBiometryFactor();
-    REPORT_ERROR_CODE(@"RemoveBiometryFactor", error);
-    return error == EC_Ok;
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto request = _session->addBiometricFactor(password.passObjRef, biometryKek.byteArrayRef);
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
 }
 
+- (nullable PowerAuthCoreRequest*) removeBiometryFactor:(NSError*_Nullable*_Nullable)error
+{
+    if (![self requireWriteAccess:error]) {
+        return nil;
+    }
+    
+    try {
+        auto request = _session->removeBiometricFactor();
+        if (request) {
+            return [[PowerAuthCoreRequest alloc] initWithRequest:request];
+        }
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
+}
+
+#pragma mark - Authentication
+
+- (nullable PowerAuthCoreHttpHeader*) calculateOnlineAuthenticationHeader:(nonnull PowerAuthCoreCredentials*)credentials
+                                                            uriIdentifier:(nonnull NSString*)uriIdentifier
+                                                               httpMethod:(nonnull NSString*)httpMethod
+                                                              requestBody:(nullable NSData*)requestBody
+                                                                    error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireWriteAccess:error]) {
+        return nil;
+    }
+    try {
+        auto header = _session->calculateOnlineAuthenticationHeader(*credentials.credentialsRef,
+                                                                    objc::CopyFromNSString(uriIdentifier),
+                                                                    objc::CopyFromNSString(httpMethod),
+                                                                    objc::CopyFromNSData(requestBody));
+        return [[PowerAuthCoreHttpHeader alloc] initWithHttpHeader:header];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
+}
+
+- (nullable NSString*) calculateOfflineAuthenticationCode:(nonnull PowerAuthCoreCredentials*)credentials
+                                            uriIdentifier:(nonnull NSString*)uriIdentifier
+                                             offlineNonce:(nonnull NSString*)offlineNonce
+                                               codeLength:(NSUInteger)codeLength
+                                                     data:(nullable NSData*)data
+                                                    error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireWriteAccess:error]) {
+        return nil;
+    }
+    try {
+        auto code = _session->calculateOfflineAuthenticationCode(*credentials.credentialsRef,
+                                                                 objc::CopyFromNSString(uriIdentifier),
+                                                                 objc::CopyFromNSString(offlineNonce),
+                                                                 objc::CopyFromNSData(data),
+                                                                 codeLength);
+        return objc::CopyToNSString(code);
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
+}
+
+- (nullable NSData*) normalizeGetRequestParameters:(nonnull NSDictionary<NSString*, NSString*>*)parameters
+                                             error:(NSError *_Nullable*_Nullable)error
+{
+    std::map<std::string, std::string> map;
+    if (!_ConvertDictToMap(parameters, map)) {
+        _ReportError(PowerAuthCoreError_WrongParameter, @"Wrong object type provided in parameters dictionary", error);
+        return nil;
+    }
+    try {
+        auto normalized = _session->getAuthenticationService()->normalizeGetRequestParameters(map);
+        return objc::CopyToNSData(normalized);
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
+}
+
+#pragma mark - Tokens
+
+- (nullable PowerAuthCoreHttpHeader*) calculateTokenHeader:(nonnull NSString *)tokenIdentifier
+                                               tokenSecret:(nonnull NSData*)tokenSecret
+                                                     error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto header = _session->calculateTokenHeader(cc7::objc::CopyFromNSString(tokenIdentifier),
+                                                     cc7::objc::CopyFromNSData(tokenSecret));
+        return [[PowerAuthCoreHttpHeader alloc] initWithHttpHeader:header];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
+}
+
+- (nullable PowerAuthCoreRequest*) createAccessToken:(nonnull PowerAuthCoreCredentials*)credentials
+                                               error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto request = _session->createAccessToken(credentials.credentialsRef);
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto tokenData = std::dynamic_pointer_cast<powerAuth::GetAccessTokenResponse>(response);
+            if (!tokenData) {
+                throw Exception(EC_InternalError, "No GetAccessTokenResponse object created");
+            }
+            return [[PowerAuthCoreTokenData alloc] initWithResponse:tokenData];
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
+}
+
+- (nullable PowerAuthCoreRequest*) removeAccessToken:(nonnull NSString *)tokenIdentifier
+                                               error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto request = _session->removeAccessToken(cc7::objc::CopyFromNSString(tokenIdentifier));
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
+    return nil;
+}
 
 #pragma mark - Vault operations
 
-- (nullable NSData*) deriveCryptographicKeyFromVaultKey:(nonnull NSString*)cVaultKey
-                                                   keys:(nonnull PowerAuthCoreSignatureUnlockKeys*)unlockKeys
-                                               keyIndex:(UInt64)keyIndex
+- (nullable PowerAuthCoreRequest*) fetchVaultEncryptionKey:(nonnull PowerAuthCoreCredentials*)credentials
+                                                     keyId:(PowerAuthCoreSecureVaultKeyId)keyId
+                                                     index:(UInt64)index
+                                                     error:(NSError *_Nullable*_Nullable)error
 {
-    REQUIRE_READ_ACCESS();
-    std::string cpp_c_vault_key = cc7::objc::CopyFromNSString(cVaultKey);
-    SignatureUnlockKeys cpp_keys;
-    PowerAuthCoreSignatureUnlockKeysToStruct(unlockKeys, cpp_keys);
-        
-    cc7::ByteArray cpp_derived_key;
-    auto error = _session->deriveCryptographicKeyFromVaultKey(cpp_c_vault_key, cpp_keys, keyIndex, cpp_derived_key);
-    if (error == EC_Ok) {
-        return cc7::objc::CopyToNSData(cpp_derived_key);
+    if (![self requireReadAccess:error]) {
+        return nil;
     }
-    REPORT_ERROR_CODE(@"DeriveCryptographicKeyFromVaultKey", error);
+    try {
+        auto request = _session->fetchVaultEncryptionKey(credentials.credentialsRef, static_cast<SecureVaultKeyId>(keyId), index);
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto dataResponse = std::dynamic_pointer_cast<powerAuth::DataResponse>(response);
+            if (!dataResponse) {
+                throw Exception(EC_InternalError, "No DataResponse object created");
+            }
+            return [[PowerAuthCoreData alloc] initWithByteRange:dataResponse->data()];
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+    }
     return nil;
 }
 
-- (nullable NSData*) signDataWithDevicePrivateKey:(nonnull NSString*)cVaultKey
-                                             keys:(nonnull PowerAuthCoreSignatureUnlockKeys*)unlockKeys
-                                             data:(nonnull NSData*)data
++ (nullable PowerAuthCoreData*) deriveVaultEncryptionKey:(nonnull PowerAuthCoreData*)vaultKey
+                                                   keyId:(PowerAuthCoreSecureVaultKeyId)keyId
+                                                   index:(UInt64)index
+                                                 keySize:(UInt64)keySize
+                                                   error:(NSError *_Nullable*_Nullable)error
 {
-    REQUIRE_READ_ACCESS();
-    std::string cpp_c_vault_key = cc7::objc::CopyFromNSString(cVaultKey);
-    cc7::ByteArray cpp_data     = cc7::objc::CopyFromNSData(data);
-    SignatureUnlockKeys cpp_keys;
-    PowerAuthCoreSignatureUnlockKeysToStruct(unlockKeys, cpp_keys);
-        
-    cc7::ByteArray cpp_signature;
-    auto error = _session->signDataWithDevicePrivateKey(cpp_c_vault_key, cpp_keys, cpp_data, cpp_signature);
-    if (error == EC_Ok) {
-        return cc7::objc::CopyToNSData(cpp_signature);
+    try {
+        auto derived = Session::deriveVaultEncryptionKey(vaultKey.byteArrayRef, index, keySize, static_cast<SecureVaultKeyId>(keyId));
+        return [[PowerAuthCoreData alloc] initWithByteRange:derived];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
     }
-    REPORT_ERROR_CODE(@"SignDataWithDevicePrivateKey", error);
     return nil;
 }
 
+
+#pragma mark - Digital signatures
+
+- (nullable NSArray<PowerAuthCoreDevicePublicKeyData*>*) exportDevicePublicKeysToFormat:(PowerAuthCoreDevicePublicKeyFormat)format
+                                                                                  error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto output_format = format == PowerAuthCoreDevicePublicKeyFormat_SPKI ? cc7::crypto::KEY_FORMAT_SPKI : cc7::crypto::KEY_FORMAT_RAW;
+        auto public_keys = _session->exportDevicePublicKeys(output_format);
+        NSMutableArray * array = [NSMutableArray arrayWithCapacity:public_keys.size()];
+        for (auto& key_data : public_keys) {
+            [array addObject:[[PowerAuthCoreDevicePublicKeyData alloc] initWithKeyData:key_data]];
+        }
+        return array;
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
+- (BOOL) verifySignature:(nonnull NSData*)signature
+                    data:(nullable NSData*)data
+                   keyId:(PowerAuthCoreSignatureKeyId)keyId
+                   error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return NO;
+    }
+    try {
+    _session->verifySignature(cc7::objc::CopyFromNSData(data),
+                              cc7::objc::CopyFromNSData(signature),
+                              static_cast<SignatureKeyId>(keyId));
+        return YES;
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return NO;
+    }
+}
+
+- (BOOL) jwsVerifySignature:(nonnull NSString*)signedData
+                compactForm:(BOOL)compactForm
+                     strict:(BOOL)strict
+                      keyId:(PowerAuthCoreSignatureKeyId)keyId
+                      error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return NO;
+    }
+    try {
+        _session->jwsVerifySignature(cc7::objc::CopyFromNSString(signedData),
+                                     static_cast<SignatureKeyId>(keyId),
+                                     compactForm,
+                                     strict);
+        return YES;
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return NO;
+    }
+}
+
+- (nullable PowerAuthCoreRequest*) signData:(nullable NSData*)data
+                                credentials:(nonnull PowerAuthCoreCredentials*)credentials
+                                      keyId:(PowerAuthCoreSignatureKeyId)keyId
+                                      error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto request = _session->signData(credentials.credentialsRef,
+                                          cc7::objc::CopyFromNSData(data),
+                                          static_cast<SignatureKeyId>(keyId));
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto dataResponse = std::dynamic_pointer_cast<powerAuth::DataResponse>(response);
+            if (!dataResponse) {
+                throw Exception(EC_InternalError, "No DataResponse object created");
+            }
+            return cc7::objc::CopyToNSData(dataResponse->data());
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
+- (nullable PowerAuthCoreRequest*) jwsSignData:(nullable NSData*)data
+                                      dataType:(nullable NSString*)dataType
+                                   compactForm:(BOOL)compactForm
+                                   credentials:(nonnull PowerAuthCoreCredentials*)credentials
+                                         keyId:(PowerAuthCoreSignatureKeyId)keyId
+                                         error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        auto request = _session->jwsSignData(credentials.credentialsRef,
+                                             cc7::objc::CopyFromNSData(data),
+                                             cc7::objc::CopyFromNSString(dataType),
+                                             static_cast<SignatureKeyId>(keyId),
+                                             compactForm);
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto stringResponse = std::dynamic_pointer_cast<powerAuth::StringResponse>(response);
+            if (!stringResponse) {
+                throw Exception(EC_InternalError, "No StringResponse object created");
+            }
+            return cc7::objc::CopyToNSString(stringResponse->string());
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
+- (nullable PowerAuthCoreRequest*) createCertificateSigningRequest:(nonnull PowerAuthCoreCredentials*)credentials
+                                                           dnItems:(nonnull NSDictionary<NSString*, NSString*>*)dnItems
+                                                          sanItems:(nullable NSArray<NSString*>*)sanItems
+                                                             keyId:(PowerAuthCoreSignatureKeyId)keyId
+                                                             error:(NSError *_Nullable*_Nullable)error
+{
+    if (![self requireReadAccess:error]) {
+        return nil;
+    }
+    try {
+        std::map<std::string, std::string> dn_items;
+        std::vector<std::string> san_items;
+        if (!_ConvertDictToMap(dnItems, dn_items)) {
+            _ReportError(PowerAuthCoreError_WrongParameter, @"Wrong object type provided in dnItems dictionary", error);
+            return nil;
+        }
+        if (!_ConvertArrayToVector(sanItems, san_items)) {
+            _ReportError(PowerAuthCoreError_WrongParameter, @"Wrong object type provided in sanItems array", error);
+            return nil;
+        }
+        auto request = _session->createCertificateSigningRequest(credentials.credentialsRef,
+                                                                 dn_items,
+                                                                 san_items,
+                                                                 static_cast<SignatureKeyId>(keyId));
+        return [[PowerAuthCoreRequest alloc] initWithRequest:request withBuilder:^id(const powerAuth::ResponseObjectPtr &response) {
+            auto stringResponse = std::dynamic_pointer_cast<powerAuth::StringResponse>(response);
+            if (!stringResponse) {
+                throw Exception(EC_InternalError, "No StringResponse object created");
+            }
+            return cc7::objc::CopyToNSString(stringResponse->string());
+        }];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
 
 #pragma mark - External encryption key
 
 - (BOOL) hasExternalEncryptionKey
 {
-    REQUIRE_READ_ACCESS();
+    if (![self requireReadAccess:nil]) {
+        return NO;
+    }
     return _session->hasExternalEncryptionKey();
 }
 
-- (PowerAuthCoreErrorCode) setExternalEncryptionKey:(nonnull NSData *)externalEncryptionKey
+- (BOOL) removeExternalEncryptionKey:(nonnull PowerAuthCoreData*)eek
+                               error:(NSError *_Nullable*_Nullable)error
 {
-    REQUIRE_READ_ACCESS();
-    auto error = _session->setExternalEncryptionKey(cc7::objc::CopyFromNSData(externalEncryptionKey));
-    REPORT_ERROR_CODE(@"SetExternalEncryptionKey", error);
-    return static_cast<PowerAuthCoreErrorCode>(error);
+    if (![self requireWriteAccess:error]) {
+        return NO;
+    }
+    try {
+        _session->removeExternalEncryptionKey(eek.byteArrayRef);
+        return YES;
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return NO;
+    }
 }
 
-- (PowerAuthCoreErrorCode) addExternalEncryptionKey:(nonnull NSData *)externalEncryptionKey
+- (BOOL) addExternalEncryptionKeyForTest:(nonnull PowerAuthCoreData*)eek
+                                   error:(NSError *_Nullable*_Nullable)error
 {
-    REQUIRE_WRITE_ACCESS();
-    auto error = _session->addExternalEncryptionKey(cc7::objc::CopyFromNSData(externalEncryptionKey));
-    REPORT_ERROR_CODE(@"AddExternalEncryptionKey", error);
-    return static_cast<PowerAuthCoreErrorCode>(error);
+    if (![self requireWriteAccess:error]) {
+        return NO;
+    }
+    try {
+        _session->addExternalEncryptionKeyForTest(eek.byteArrayRef);
+        return YES;
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return NO;
+    }
 }
 
-- (PowerAuthCoreErrorCode) removeExternalEncryptionKey
+#pragma mark - Services
+
+- (PowerAuthCoreEncryptorFactory*) encryptorFactory
 {
-    REQUIRE_WRITE_ACCESS();
-    auto error = _session->removeExternalEncryptionKey();
-    REPORT_ERROR_CODE(@"RemoveExternalEncryptionKey", error);
-    return static_cast<PowerAuthCoreErrorCode>(error);
-}
-
-
-#pragma mark - ECIES
-
-- (nullable PowerAuthCoreEciesEncryptor*) eciesEncryptorForScope:(PowerAuthCoreEciesEncryptorScope)scope
-                                                            keys:(nullable PowerAuthCoreSignatureUnlockKeys*)unlockKeys
-                                                     sharedInfo1:(nullable NSData*)sharedInfo1
-{
-    REQUIRE_READ_ACCESS();
-    ECIESEncryptorScope cpp_scope   = (ECIESEncryptorScope)scope;
-    cc7::ByteArray cpp_shared_info1 = cc7::objc::CopyFromNSData(sharedInfo1);
-    SignatureUnlockKeys cpp_keys;
-    PowerAuthCoreSignatureUnlockKeysToStruct(unlockKeys, cpp_keys);
-    
-    PowerAuthCoreEciesEncryptor * encryptor = [[PowerAuthCoreEciesEncryptor alloc] init];
-    auto error = _session->getEciesEncryptor(cpp_scope, cpp_keys, cpp_shared_info1, encryptor.encryptorRef);
-    REPORT_ERROR_CODE(@"GetEciesEncryptor", error);
-    return error == EC_Ok ? encryptor : nil;
+    // TODO: keep reference internally, but must be updated after the protocol upgrade.
+    return [[PowerAuthCoreEncryptorFactory alloc] initWithFactory:_session->getEncryptorFactory()];
 }
 
 #pragma mark - Utilities for generic keys
 
-+ (nonnull NSData*) normalizeSignatureUnlockKeyFromData:(nonnull NSData*)data
+- (PowerAuthCoreData*) generateFactorKek:(NSError**)error
 {
-    return cc7::objc::CopyToNSData(Session::normalizeSignatureUnlockKeyFromData(cc7::ByteRange(data.bytes, data.length)));
-}
-
-
-+ (nonnull NSData*) generateSignatureUnlockKey
-{
-    return cc7::objc::CopyToNSData(Session::generateSignatureUnlockKey());
-}
-
-
-+ (nonnull NSString*) generateActivationStatusChallenge
-{
-    return cc7::objc::CopyToNSString(Session::generateSignatureUnlockKey().base64String());
-}
-
-
-#pragma mark - Protocol upgrade
-
-- (BOOL) startProtocolUpgrade
-{
-    REQUIRE_WRITE_ACCESS();
-    ErrorCode error = _session->startProtocolUpgrade();
-    REPORT_ERROR_CODE(@"StartProtocolUpgrade", error);
-    return error == EC_Ok;
-}
-
-- (PowerAuthCoreProtocolVersion) pendingProtocolUpgradeVersion
-{
-    REQUIRE_READ_ACCESS();
-    return (PowerAuthCoreProtocolVersion) _session->pendingProtocolUpgradeVersion();
-}
-
-- (BOOL) applyProtocolUpgradeData:(nonnull id<PowerAuthCoreProtocolUpgradeData>)upgradeData
-{
-    REQUIRE_WRITE_ACCESS();
-    ErrorCode error;
-    if ([upgradeData conformsToProtocol:@protocol(PowerAuthCoreProtocolUpgradeDataPrivate)]) {
-        id<PowerAuthCoreProtocolUpgradeDataPrivate> upgradeDataObject = (id<PowerAuthCoreProtocolUpgradeDataPrivate>)upgradeData;
-        // Convert data to C++ & commit to underlying session
-        ProtocolUpgradeData cpp_upgrade_data;
-        [upgradeDataObject setupStructure:cpp_upgrade_data];
-        error = _session->applyProtocolUpgradeData(cpp_upgrade_data);
-    } else {
-        error = EC_WrongParam;
-    }
-    REPORT_ERROR_CODE(@"ApplyProtocolUpgradeData", error);
-    return error == EC_Ok;
-}
-
-- (BOOL) finishProtocolUpgrade
-{
-    REQUIRE_WRITE_ACCESS();
-    ErrorCode error = _session->finishProtocolUpgrade();
-    REPORT_ERROR_CODE(@"FinishProtocolUpgrade", error);
-    return error == EC_Ok;
-}
-
-+ (NSString*) maxSupportedHttpProtocolVersion:(PowerAuthCoreProtocolVersion)protocolVersion
-{
-    return cc7::objc::CopyToNSString(Session::maxSupportedHttpProtocolVersion(static_cast<Version>(protocolVersion)));
-}
-
-#pragma mark - Recovery codes
-
-- (BOOL) hasActivationRecoveryData
-{
-    REQUIRE_READ_ACCESS();
-    return _session->hasActivationRecoveryData();
-}
-
-- (PowerAuthCoreRecoveryData*) activationRecoveryData:(NSString *)cVaultKey keys:(PowerAuthCoreSignatureUnlockKeys *)unlockKeys
-{
-    REQUIRE_READ_ACCESS();
-    std::string cpp_c_vault_key = cc7::objc::CopyFromNSString(cVaultKey);
-    SignatureUnlockKeys cpp_keys;
-    PowerAuthCoreSignatureUnlockKeysToStruct(unlockKeys, cpp_keys);
-    
-    RecoveryData cpp_recovery_data;
-    ErrorCode error = _session->getActivationRecoveryData(cpp_c_vault_key, cpp_keys, cpp_recovery_data);
-    if (error != EC_Ok) {
-        REPORT_ERROR_CODE(@"ActivationRecoveryData", error);
+    if (![self requireReadAccess:error]) {
         return nil;
     }
-    return PowerAuthCoreRecoveryDataToObject(cpp_recovery_data);
+    try {
+        auto kek = _session->generateFactorKek();
+        return [[PowerAuthCoreData alloc] initWithByteRange:kek];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
++ (nullable PowerAuthCoreData*) generateFactorKekForProtocolVersion:(PowerAuthCoreProtocolVersion)protocolVersion
+                                                              error:(NSError**)error
+{
+    try {
+        auto kek = Session::generateFactorKekForProtocol((ProtocolVersion)protocolVersion);
+        return [[PowerAuthCoreData alloc] initWithByteRange:kek];
+    } catch (...) {
+        if (error) {
+            *error = BuildNSErrorFromException();
+        }
+        return nil;
+    }
+}
+
++ (nullable NSString*) maxSupportedHttpProtocolVersion:(PowerAuthCoreProtocolVersion)protocolVersion
+{
+    try {
+        return cc7::objc::CopyToNSString(ProtocolVersion_GetHttpHeaderVersion(static_cast<ProtocolVersion>(protocolVersion)));
+    } catch (...) {
+        return nil;
+    }
 }
 
 @end

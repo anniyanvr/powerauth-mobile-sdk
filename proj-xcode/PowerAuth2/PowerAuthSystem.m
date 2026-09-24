@@ -24,8 +24,8 @@
 #include "TargetConditionals.h"
 
 #if PA2_HAS_CORE_MODULE
-@import PowerAuthCore;
-#define _CoreModuleIsDebug() [PowerAuthCoreSession hasDebugFeatures]
+#import <PowerAuthCore/PowerAuthCore.h>
+#define _CoreModuleIsDebug() PowerAuthCoreHasDebugFeatures()
 #else
 #define _CoreModuleIsDebug() NO
 #endif
@@ -34,7 +34,7 @@
 
 + (BOOL) isInDebug {
     BOOL result = _CoreModuleIsDebug();
-#if defined(ENABLE_PA2_LOG) || defined(DEBUG)
+#if defined(DEBUG)
     result |= YES;
 #endif
     return result;

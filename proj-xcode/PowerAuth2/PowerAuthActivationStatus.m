@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthActivationStatus.h>
+#import "PowerAuthActivationStatus.h"
 #import "PowerAuthActivationStatus+Private.h"
 
-@import PowerAuthCore;
+#import <PowerAuthCore/PowerAuthCore.h>
 
 @implementation PowerAuthActivationStatus
 {
@@ -44,44 +44,45 @@
     return _status.remainingAttempts;
 }
 
-@end
-
-@implementation PowerAuthActivationStatus (Private)
-
-- (instancetype) initWithCoreStatus:(PowerAuthCoreActivationStatus *)status
-                       customObject:(NSDictionary<NSString *,NSObject *> *)customObject
-{
-    self = [super init];
-    if (self) {
-        _status = status;
-        _customObject = customObject;
-    }
-    return self;
-}
-
-- (UInt8) currentActivationVersion
-{
-    return _status.currentActivationVersion;
-}
-
-- (UInt8) upgradeActivationVersion
-{
-    return _status.upgradeActivationVersion;
-}
-
 - (BOOL) isProtocolUpgradeAvailable
 {
     return _status.isProtocolUpgradeAvailable;
 }
 
-- (BOOL) isSignatureCalculationRecommended
+- (NSDictionary<NSString*, NSObject*>*) customObject
 {
-    return _status.isSignatureCalculationRecommended;
+    return _status.customObject;
 }
 
-- (BOOL) needsSerializeSessionState
+- (NSString*) description
 {
-    return _status.needsSerializeSessionState;
+    NSString * state;
+    switch (_status.state) {
+        case PowerAuthCoreActivationState_Active:       state = @"active"; break;
+        case PowerAuthCoreActivationState_Blocked:      state = @"blocked"; break;
+        case PowerAuthCoreActivationState_Removed:      state = @"removed"; break;
+        case PowerAuthCoreActivationState_PendingCommit:state = @"pendingCommit"; break;
+        case PowerAuthCoreActivationState_Deadlock:     state = @"deadlock"; break;
+        default:
+            state = @"???";
+            break;
+    }
+    NSString * upgrade = _status.isProtocolUpgradeAvailable ? @", upgradeAvail" : @"";
+    return [NSString stringWithFormat:@"<PowerAuthActivationStatus state=%@, remaining=%@/%@%@>",
+            state, @(_status.remainingAttempts), @(_status.maxFailCount), upgrade];
+}
+
+@end
+
+@implementation PowerAuthActivationStatus (Private)
+
+- (instancetype) initWithCoreStatus:(PowerAuthCoreActivationStatus *)status
+{
+    self = [super init];
+    if (self) {
+        _status = status;
+    }
+    return self;
 }
 
 @end

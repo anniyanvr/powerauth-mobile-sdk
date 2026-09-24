@@ -19,12 +19,9 @@ package io.getlime.security.powerauth.integration.tests;
 import android.content.Context;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.test.ext.junit.runners.AndroidJUnit4;
 
-import org.junit.After;
-import org.junit.Before;
+import io.getlime.security.powerauth.networking.response.IGenerateTokenHeaderListener;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 
 import java.util.Map;
 import java.util.Objects;
@@ -32,48 +29,31 @@ import java.util.Objects;
 import io.getlime.security.powerauth.exception.PowerAuthErrorCodes;
 import io.getlime.security.powerauth.exception.PowerAuthErrorException;
 import io.getlime.security.powerauth.integration.support.AsyncHelper;
-import io.getlime.security.powerauth.integration.support.PowerAuthTestHelper;
-import io.getlime.security.powerauth.integration.support.model.SignatureType;
+import io.getlime.security.powerauth.integration.support.model.AuthCodeType;
 import io.getlime.security.powerauth.integration.support.model.TokenInfo;
 import io.getlime.security.powerauth.networking.exceptions.ErrorResponseApiException;
 import io.getlime.security.powerauth.networking.interfaces.ICancelable;
 import io.getlime.security.powerauth.networking.response.IGetTokenListener;
 import io.getlime.security.powerauth.networking.response.IRemoveTokenListener;
 import io.getlime.security.powerauth.sdk.PowerAuthAuthentication;
-import io.getlime.security.powerauth.sdk.PowerAuthAuthorizationHttpHeader;
-import io.getlime.security.powerauth.sdk.PowerAuthSDK;
+import io.getlime.security.powerauth.sdk.PowerAuthHttpHeader;
 import io.getlime.security.powerauth.sdk.PowerAuthToken;
 import io.getlime.security.powerauth.sdk.PowerAuthTokenStore;
 
 import static org.junit.Assert.*;
 
-@RunWith(AndroidJUnit4.class)
-public class TokenStoreTest {
+public class TokenStoreTest extends BaseTest {
 
-    private PowerAuthTestHelper testHelper;
-    private PowerAuthSDK powerAuthSDK;
     private PowerAuthTokenStore tokenStore;
-    private ActivationHelper activationHelper;
-    private SignatureHelper signatureHelper;
 
     private static final String TOKEN_NAME_POSSESSION = "TestToken_POSSESSION";
     private static final String TOKEN_NAME_POSSESSION_KNOWLEDGE = "TestToken_POSSESSION_KNOWLEDGE";
     private static final String TOKEN_NAME_OTHER = "TestToken_OTHER";
 
-    @Before
+    @Override
     public void setUp() throws Exception {
-        testHelper = new PowerAuthTestHelper.Builder().build();
-        powerAuthSDK = testHelper.getSharedSdk();
+        super.setUp();
         tokenStore = powerAuthSDK.getTokenStore();
-        activationHelper = new ActivationHelper(testHelper);
-        signatureHelper = new SignatureHelper();
-    }
-
-    @After
-    public void tearDown() {
-        if (activationHelper != null) {
-            activationHelper.cleanupAfterTest();
-        }
     }
 
     @Test(expected = PowerAuthErrorException.class)
@@ -109,7 +89,7 @@ public class TokenStoreTest {
         assertTrue(token1.canGenerateHeader());
         assertTrue(tokenStore.hasLocalToken(context, TOKEN_NAME_POSSESSION));
 
-        assertTrue(calculateAndValidateTokenDigest(token1, SignatureType.POSSESSION));
+        assertTrue(calculateAndValidateTokenDigest(token1, AuthCodeType.POSSESSION));
 
         // Possession + Knowledge
         assertFalse(tokenStore.hasLocalToken(context, TOKEN_NAME_POSSESSION_KNOWLEDGE));
@@ -120,10 +100,10 @@ public class TokenStoreTest {
         assertTrue(token2.canGenerateHeader());
         assertTrue(tokenStore.hasLocalToken(context, TOKEN_NAME_POSSESSION_KNOWLEDGE));
 
-        assertTrue(calculateAndValidateTokenDigest(token2, SignatureType.POSSESSION_KNOWLEDGE));
+        assertTrue(calculateAndValidateTokenDigest(token2, AuthCodeType.POSSESSION_KNOWLEDGE));
 
         // Try to re-create SDK. This simulates application restart.
-        powerAuthSDK = testHelper.reCreateSdk(null, null, null);
+        powerAuthSDK = activationHelper.reCreateSdk();
         tokenStore = powerAuthSDK.getTokenStore();
 
         // Now ask for the same tokens
@@ -132,8 +112,8 @@ public class TokenStoreTest {
         token2 = requestAccessToken(TOKEN_NAME_POSSESSION_KNOWLEDGE, activationHelper.getValidAuthentication(), true);
         assertNotNull(token1);
         assertNotNull(token2);
-        assertTrue(calculateAndValidateTokenDigest(token1, SignatureType.POSSESSION));
-        assertTrue(calculateAndValidateTokenDigest(token2, SignatureType.POSSESSION_KNOWLEDGE));
+        assertTrue(calculateAndValidateTokenDigest(token1, AuthCodeType.POSSESSION));
+        assertTrue(calculateAndValidateTokenDigest(token2, AuthCodeType.POSSESSION_KNOWLEDGE));
 
         // Invalid password
         assertFalse(tokenStore.hasLocalToken(context, TOKEN_NAME_OTHER));
@@ -279,7 +259,7 @@ public class TokenStoreTest {
         assertNotNull(token5[0]);
         assertEquals(token1[0], token2[0]);
         assertEquals(token1[0], token3[0]);
-        assertEquals(token2[0], token2[0]);
+        assertEquals(token2[0], token3[0]);
         assertEquals(token4[0], token5[0]);
         assertNotEquals(token1[0], token4[0]);
     }
@@ -378,16 +358,35 @@ public class TokenStoreTest {
      * Calculate and validate token digest.
      *
      * @param token Token to be tested.
-     * @param expectedSignatureType Expected signature type.
+     * @param expectedAuthCodeType Expected authentication code type.
      * @return Always return true.
      * @throws Exception In case of failure.
      */
-    private boolean calculateAndValidateTokenDigest(@NonNull PowerAuthToken token, @NonNull SignatureType expectedSignatureType) throws Exception {
+    private boolean calculateAndValidateTokenDigest(@NonNull PowerAuthToken token, @NonNull AuthCodeType expectedAuthCodeType) throws Exception {
         assertTrue(token.canGenerateHeader());
-        PowerAuthAuthorizationHttpHeader header = token.generateHeader();
-        assertTrue(header.isValid());
+        assertNotNull(token.getTokenName());
+
+        PowerAuthHttpHeader header = AsyncHelper.await(resultCatcher -> {
+            ICancelable task = token.tokenStore.generateAuthenticationHeader(testHelper.getContext(), token.getTokenName(), new IGenerateTokenHeaderListener() {
+                @Override
+                public void onGenerateTokenHeaderSucceeded(@NonNull PowerAuthHttpHeader header) {
+                    try {
+                        resultCatcher.completeWithResult(header);
+                    } catch (Throwable t) {
+                        resultCatcher.completeWithError(t);
+                    }
+                }
+
+                @Override
+                public void onGenerateTokenHeaderFailed(@NonNull Throwable t) {
+                    resultCatcher.completeWithError(t);
+                }
+            });
+            assertNotNull(task);
+        });
+
         assertEquals("X-PowerAuth-Token", header.getKey());
-        Map<String, String> headerComponents = signatureHelper.parseAuthorizationHeader(header);
+        Map<String, String> headerComponents = AuthenticationHelper.parseAuthenticationHeader(header);
         // Validate values
         assertEquals(testHelper.getProtocolVersionForHeader(), headerComponents.get("version"));
         assertEquals(token.getTokenIdentifier(), headerComponents.get("token_id"));
@@ -396,11 +395,13 @@ public class TokenStoreTest {
         long timestamp = Long.parseLong(Objects.requireNonNull(headerComponents.get("timestamp")));
         String nonce = Objects.requireNonNull(headerComponents.get("nonce"));
         String digest = Objects.requireNonNull(headerComponents.get("token_digest"));
+        String version = Objects.requireNonNull(headerComponents.get("version"));
 
-        TokenInfo tokenInfo = testHelper.getServerApi().validateToken(tokenId, digest, nonce, timestamp);
+        TokenInfo tokenInfo = testHelper.getServerApi().validateToken(tokenId, digest, nonce, timestamp, version);
         assertNotNull(tokenInfo);
         assertTrue(tokenInfo.isTokenValid());
-        assertEquals(expectedSignatureType, tokenInfo.getSignatureType());
+        assertEquals(expectedAuthCodeType, tokenInfo.getAuthenticationCodeType());
+
         return true;
     }
 }

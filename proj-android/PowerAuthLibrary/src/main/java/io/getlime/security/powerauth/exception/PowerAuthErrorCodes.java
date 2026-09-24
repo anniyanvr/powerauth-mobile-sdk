@@ -20,31 +20,11 @@ import androidx.annotation.IntDef;
 
 import java.lang.annotation.Retention;
 
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.PENDING_ACTIVATION;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.BIOMETRY_LOCKOUT;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.BIOMETRY_NOT_RECOGNIZED;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.BIOMETRY_CANCEL;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.BIOMETRY_NOT_SUPPORTED;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.ENCRYPTION_ERROR;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.INSUFFICIENT_KEYCHAIN_PROTECTION;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.INVALID_ACTIVATION_CODE;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.INVALID_ACTIVATION_DATA;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.INVALID_ACTIVATION_STATE;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.INVALID_TOKEN;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.MISSING_ACTIVATION;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.NETWORK_ERROR;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.OPERATION_CANCELED;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.PENDING_PROTOCOL_UPGRADE;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.PROTOCOL_UPGRADE;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.SIGNATURE_ERROR;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.WRONG_PARAMETER;
-import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.SUCCEED;
+import static io.getlime.security.powerauth.exception.PowerAuthErrorCodes.*;
 import static java.lang.annotation.RetentionPolicy.SOURCE;
 
 /**
  * The {@code PowerAuthErrorCodes} interface defines various error constants reported from PowerAuth SDK.
- *
  */
 @Retention(SOURCE)
 @IntDef({SUCCEED, NETWORK_ERROR, SIGNATURE_ERROR, INVALID_ACTIVATION_STATE,
@@ -53,7 +33,8 @@ import static java.lang.annotation.RetentionPolicy.SOURCE;
         INVALID_TOKEN, ENCRYPTION_ERROR, WRONG_PARAMETER,
         PROTOCOL_UPGRADE, PENDING_PROTOCOL_UPGRADE,
         BIOMETRY_NOT_SUPPORTED, BIOMETRY_NOT_AVAILABLE, BIOMETRY_NOT_RECOGNIZED,
-        INSUFFICIENT_KEYCHAIN_PROTECTION, BIOMETRY_LOCKOUT})
+        INSUFFICIENT_KEYCHAIN_PROTECTION, BIOMETRY_LOCKOUT, TIME_SYNCHRONIZATION,
+        BIOMETRY_NOT_ENROLLED, WRONG_SIGNATURE, OTHER, UPGRADE_SDK})
 public @interface PowerAuthErrorCodes {
 
     /**
@@ -106,7 +87,7 @@ public @interface PowerAuthErrorCodes {
     int OPERATION_CANCELED = 11;
 
     /**
-     * Error code for error that occurs when invalid activation or invalid recovery code is provided.
+     * Error code for error that occurs when invalid activation code is provided.
      */
     int INVALID_ACTIVATION_CODE = 12;
 
@@ -155,8 +136,8 @@ public @interface PowerAuthErrorCodes {
      * The biometric authentication did not recognize the biometric image (fingerprint, face, etc...)
      * <p>
      * Be aware that this error code is reported only during the biometric factor setup, but is never
-     * reported when PowerAuth signature with biometric factor is requested. This is because the
-     * PowerAuth SDK swallows this error code internally and generates a random biometric signature
+     * reported when PowerAuth authentication code with biometric factor is requested. This is because the
+     * PowerAuth SDK swallows this error code internally and generates a random authentication code
      * and pretends that everything is OK. The result is that a counter of failed attempts on the server
      * is increased, so the attacker has a limited ability to fool the biometric sensor.
      */
@@ -177,4 +158,29 @@ public @interface PowerAuthErrorCodes {
      * authentication (PIN, password, pattern).
      */
     int BIOMETRY_LOCKOUT = 22;
+
+    /**
+     * Failed to synchronize time with the server.
+     */
+    int TIME_SYNCHRONIZATION = 23;
+
+    /**
+     * The biometric authentication failed because there's no biometry enrolled on the device.
+     */
+    int BIOMETRY_NOT_ENROLLED = 24;
+    /**
+     * Digital or JWS signature is not valid.
+     */
+    int WRONG_SIGNATURE = 25;
+    /**
+     * Upgrade the PowerAuth Mobile SDK in your application. This error may occur if the local
+     * activation data was created with a newer version of the SDK than the one currently used
+     * in your application. This situation can happen if you downgraded your application during
+     * testing.
+     */
+    int UPGRADE_SDK = 26;
+    /**
+     * Other, unspecified error.
+     */
+    int OTHER = 27;
 }

@@ -19,12 +19,13 @@ package io.getlime.security.powerauth.biometry.impl;
 import android.os.Build;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.biometric.BiometricPrompt;
 
 import java.security.InvalidAlgorithmParameterException;
-import java.security.InvalidKeyException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -33,19 +34,20 @@ import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
 import java.security.ProviderException;
 import java.security.PublicKey;
-import java.security.spec.InvalidKeySpecException;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 
 import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.NoSuchPaddingException;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 
 import io.getlime.security.powerauth.biometry.BiometricKeyData;
 import io.getlime.security.powerauth.biometry.IBiometricKeyEncryptor;
+import io.getlime.security.powerauth.core.SecureData;
+import io.getlime.security.powerauth.exception.PowerAuthErrorCodes;
+import io.getlime.security.powerauth.exception.PowerAuthErrorException;
 import io.getlime.security.powerauth.system.PowerAuthLog;
 
 /**
@@ -54,7 +56,6 @@ import io.getlime.security.powerauth.system.PowerAuthLog;
  * is stored in Android KeyStore and the biometric authentication is required only for data
  * decryption.
  */
-@RequiresApi(api = Build.VERSION_CODES.M)
 public class BiometricKeyEncryptorRsa implements IBiometricKeyEncryptor {
 
     /**
@@ -106,53 +107,58 @@ public class BiometricKeyEncryptorRsa implements IBiometricKeyEncryptor {
     }
 
     @Override
+    public int getEncryptorType() {
+        return EncryptorType.RSA;
+    }
+
+    @Override
     public boolean isAuthenticationRequiredOnEncryption() {
         return false;
     }
 
-    @Nullable
+    @NonNull
     @Override
-    public Cipher initializeCipher(boolean encryptMode) {
+    public BiometricPrompt.CryptoObject initializeCryptoObject(boolean encryptMode) throws PowerAuthErrorException {
         try {
             if (cipherIsInitialized) {
                 throw new IllegalStateException("Cipher is already initialized");
             }
             // Get instance of RSA cipher
             cipher = Cipher.getInstance(RSA_CIPHER);
-            if (cipher != null) {
-                if (encryptMode) {
-                    // Initialize for encryption with public key.
-                    if (publicKey == null) {
-                        throw new IllegalStateException("Initializing cipher for encryption, but public key is missing");
-                    }
-                    // Initialize RSA parameters (OAEP with SHA-256 and MGF1).
-                    // Note that MGF1 configured with SHA-256 is not supported, so that's why we still use SHA-1.
-                    final PublicKey unrestrictedPublicKey = KeyFactory.getInstance(publicKey.getAlgorithm()).generatePublic(new X509EncodedKeySpec(publicKey.getEncoded()));
-                    final OAEPParameterSpec spec = new OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT);
-                    // Initialize cipher for data encryption
-                    cipher.init(Cipher.ENCRYPT_MODE, unrestrictedPublicKey, spec);
-                } else {
-                    // Initialize for decryption with private key.
-                    if (privateKey == null) {
-                        throw new IllegalStateException("Initializing cipher for decryption, but private key is missing");
-                    }
-                    // Initialize cipher for data decryption.
-                    cipher.init(Cipher.DECRYPT_MODE, privateKey);
-                }
-                this.encryptMode = encryptMode;
+            if (cipher == null) {
+                throw new NoSuchAlgorithmException("Failed to initialize " + RSA_CIPHER);
             }
-        } catch (ProviderException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeySpecException | InvalidAlgorithmParameterException | InvalidKeyException e) {
-            PowerAuthLog.e("BiometricKeyEncryptorRsa.initializeCipher failed: " + e.getMessage());
-            this.cipher = null;
+            if (encryptMode) {
+                // Initialize for encryption with public key.
+                if (publicKey == null) {
+                    throw new IllegalStateException("Initializing cipher for encryption, but public key is missing");
+                }
+                // Initialize RSA parameters (OAEP with SHA-256 and MGF1).
+                // Note that MGF1 configured with SHA-256 is not supported, so that's why we still use SHA-1.
+                final PublicKey unrestrictedPublicKey = KeyFactory.getInstance(publicKey.getAlgorithm()).generatePublic(new X509EncodedKeySpec(publicKey.getEncoded()));
+                final OAEPParameterSpec spec = new OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT);
+                // Initialize cipher for data encryption
+                cipher.init(Cipher.ENCRYPT_MODE, unrestrictedPublicKey, spec);
+            } else {
+                // Initialize for decryption with private key.
+                if (privateKey == null) {
+                    throw new IllegalStateException("Initializing cipher for decryption, but private key is missing");
+                }
+                // Initialize cipher for data decryption.
+                cipher.init(Cipher.DECRYPT_MODE, privateKey);
+            }
+            this.encryptMode = encryptMode;
+        } catch (Throwable e) {
+            throw PowerAuthErrorException.wrapException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, "Failed to initialize RSA biometric key encryptor", e);
         } finally {
             cipherIsInitialized = true;
         }
-        return cipher;
+        return new BiometricPrompt.CryptoObject(cipher);
     }
 
     @Nullable
     @Override
-    public BiometricKeyData encryptBiometricKey(@NonNull byte[] key) {
+    public BiometricKeyData encryptBiometricKey(@NonNull SecureData key) {
         try {
             // State checks
             if (cipher == null) {
@@ -167,7 +173,7 @@ public class BiometricKeyEncryptorRsa implements IBiometricKeyEncryptor {
             encryptorIsUsed = true;
 
             // Encrypt data
-            final byte[] encryptedBiometricKey = cipher.doFinal(key);
+            final SecureData encryptedBiometricKey = SecureData.capture(cipher.doFinal(key.getSensitiveData()));
             // RSA encryptor really encrypts and decrypts data. That means that 'key' on input is
             // already the key, that will protect biometric factor for PowerAuth protocol.
             return new BiometricKeyData(encryptedBiometricKey, key, true);
@@ -180,7 +186,7 @@ public class BiometricKeyEncryptorRsa implements IBiometricKeyEncryptor {
 
     @Nullable
     @Override
-    public BiometricKeyData decryptBiometricKey(@NonNull byte[] encryptedKey) {
+    public BiometricKeyData decryptBiometricKey(@NonNull SecureData encryptedKey) {
         try {
             // State checks
             if (cipher == null) {
@@ -195,7 +201,7 @@ public class BiometricKeyEncryptorRsa implements IBiometricKeyEncryptor {
             encryptorIsUsed = true;
 
             // Decrypt data
-            final byte[] decryptedKey = cipher.doFinal(encryptedKey);
+            final SecureData decryptedKey = SecureData.capture(cipher.doFinal(encryptedKey.getSensitiveData()));
             // The decrypted key is the key that was previously used to lock PowerAuth biometric
             // factor. Just for convenience, we'll return the same data as we received on input.
             return new BiometricKeyData(encryptedKey, decryptedKey, false);
@@ -223,6 +229,7 @@ public class BiometricKeyEncryptorRsa implements IBiometricKeyEncryptor {
                     KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
                     .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+                    .setKeySize(3072)
                     .setUserAuthenticationRequired(true);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 builder.setInvalidatedByBiometricEnrollment(invalidateByBiometricEnrollment);

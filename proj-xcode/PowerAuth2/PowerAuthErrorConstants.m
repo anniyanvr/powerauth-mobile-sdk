@@ -17,8 +17,11 @@
 // PA2_SHARED_SOURCE PowerAuth2ForWatch .
 // PA2_SHARED_SOURCE PowerAuth2ForExtensions .
 
-#import <PowerAuth2/PowerAuthErrorConstants.h>
+#import "PowerAuthErrorConstants.h"
+#import "PowerAuthRestApiErrorResponse.h"
 #import "PA2PrivateConstants.h"
+
+#import <PowerAuthCore/PowerAuthCore.h>
 
 #pragma mark - Error codes
 
@@ -43,6 +46,7 @@ NSString * PA2MakeDefaultErrorDescription(NSInteger errorCode, NSString * messag
         _CODE_DESC(PowerAuthErrorCode_ActivationPending, @"Pending activation")
         _CODE_DESC(PowerAuthErrorCode_BiometryNotAvailable, @"Biometry is not supported or is unavailable")
         _CODE_DESC(PowerAuthErrorCode_BiometryCancel, @"User did cancel biometry authentication dialog")
+        _CODE_DESC(PowerAuthErrorCode_BiometryFallback, @"User did press fallback at biometry authentication dialog")
         _CODE_DESC(PowerAuthErrorCode_BiometryFailed, @"Biometry authentication failed")
         _CODE_DESC(PowerAuthErrorCode_OperationCancelled, @"Operation was cancelled by SDK")
         _CODE_DESC(PowerAuthErrorCode_Encryption, @"General encryption failure")
@@ -50,12 +54,80 @@ NSString * PA2MakeDefaultErrorDescription(NSInteger errorCode, NSString * messag
         _CODE_DESC(PowerAuthErrorCode_InvalidToken, @"Invalid or unknown token")
         _CODE_DESC(PowerAuthErrorCode_WatchConnectivity, @"Watch connectivity error")
         _CODE_DESC(PowerAuthErrorCode_ProtocolUpgrade, @"Protocol upgrade error")
-        _CODE_DESC(PowerAuthErrorCode_PendingProtocolUpgrade, @"Pending protocol ugprade, try later")
+        _CODE_DESC(PowerAuthErrorCode_PendingProtocolUpgrade, @"Pending protocol upgrade, try later")
         _CODE_DESC(PowerAuthErrorCode_ExternalPendingOperation, @"Other application does critical operation")
+        _CODE_DESC(PowerAuthErrorCode_TimeSynchronization, @"Failed to synchronize time with the server")
+        _CODE_DESC(PowerAuthErrorCode_WrongSignature, @"Wrong digital signature")
+        _CODE_DESC(PowerAuthErrorCode_UpgradeSDK, @"PowerAuth Mobile SDK update is required")
+        _CODE_DESC(PowerAuthErrorCode_Other, @"Unspecified error")
         default:
             return [NSString stringWithFormat:@"Unknown error %@", @(errorCode)];
     }
 #undef _CODE_DESC
+}
+
+NSError * PA2WrapError(NSError * error, NSError** out_error)
+{
+    NSString * domain = error.domain;
+    NSError * wrapped = nil;
+    
+    PowerAuthErrorCode errorCode;
+    if ([domain isEqualToString:PowerAuthErrorDomain]) {
+        wrapped = error;
+        errorCode = PowerAuthErrorCode_NA;
+    } else if ([domain isEqualToString:PowerAuthCoreErrorDomain]) {
+        switch ([error powerAuthCoreErrorCode]) {
+            case PowerAuthCoreError_MissingActivation:
+                errorCode = PowerAuthErrorCode_MissingActivation;
+                break;
+            case PowerAuthCoreError_WrongActivationState:
+                errorCode = PowerAuthErrorCode_InvalidActivationState;
+                break;
+            case PowerAuthCoreError_WrongParameter:
+                errorCode = PowerAuthErrorCode_WrongParameter;
+                break;
+            case PowerAuthCoreError_BiometryNotAllowed:
+                errorCode = PowerAuthErrorCode_BiometryNotAvailable;
+                break;
+            case PowerAuthCoreError_WrongSignature:
+                errorCode = PowerAuthErrorCode_WrongSignature;
+                break;
+            case PowerAuthCoreError_Canceled:
+                errorCode = PowerAuthErrorCode_OperationCancelled;
+                break;
+            case PowerAuthCoreError_TimeNotSynchronized:
+                errorCode = PowerAuthErrorCode_TimeSynchronization;
+                break;
+            case PowerAuthCoreError_PendingProtocolUpgrade:
+                errorCode = PowerAuthErrorCode_PendingProtocolUpgrade;
+                break;
+            case PowerAuthCoreError_InvalidActivationData:
+                errorCode = PowerAuthErrorCode_InvalidActivationData;
+                break;
+            case PowerAuthCoreError_UpgradeSDK:
+                errorCode = PowerAuthErrorCode_UpgradeSDK;
+                break;
+            default:
+                errorCode = PowerAuthErrorCode_Other;
+                break;
+        }
+    } else if ([domain isEqualToString:NSURLErrorDomain]) {
+        // Transport-level failure (e.g. timeout, no connection, TLS error)
+        errorCode = PowerAuthErrorCode_NetworkError;
+    } else {
+        errorCode = PowerAuthErrorCode_Other;
+    }
+    if (!wrapped) {
+        NSDictionary * info = @{
+            NSLocalizedDescriptionKey: [error localizedDescription],
+            NSUnderlyingErrorKey: error
+        };
+        wrapped = [NSError errorWithDomain:PowerAuthErrorDomain code:errorCode userInfo:info];
+    }
+    if (out_error) {
+        *out_error = wrapped;
+    }
+    return wrapped;
 }
 
 NSError * PA2MakeError(NSInteger errorCode, NSString * message)
@@ -64,9 +136,18 @@ NSError * PA2MakeError(NSInteger errorCode, NSString * message)
     return [NSError errorWithDomain:PowerAuthErrorDomain code:errorCode userInfo:info];
 }
 
+NSError * PA2MakeErrorWithReason(PowerAuthErrorCode errorCode, NSString * message, NSError * reason)
+{
+    NSDictionary * info = @{
+        NSLocalizedDescriptionKey: PA2MakeDefaultErrorDescription(errorCode, message),
+        NSUnderlyingErrorKey: reason
+    };
+    return [NSError errorWithDomain:PowerAuthErrorDomain code:errorCode userInfo:info];
+}
+
 NSError * PA2MakeErrorInfo(NSInteger errorCode, NSString * message, NSDictionary * info)
 {
-    NSMutableDictionary * mutableInfo = [info mutableCopy];
+    NSMutableDictionary * mutableInfo = info ? [info mutableCopy] : [NSMutableDictionary dictionary];
     mutableInfo[NSLocalizedDescriptionKey] = PA2MakeDefaultErrorDescription(errorCode, message);
     return [NSError errorWithDomain:PowerAuthErrorDomain code:errorCode userInfo:mutableInfo];
 }
@@ -81,6 +162,14 @@ NSError * PA2MakeErrorInfo(NSInteger errorCode, NSString * message, NSDictionary
         return (PowerAuthErrorCode)self.code;
     }
     return PowerAuthErrorCode_NA;
+}
+
+- (PowerAuthRestApiErrorResponse*) powerAuthRestApiErrorResponse
+{
+    if ([self.domain isEqualToString:PowerAuthErrorDomain]) {
+        return self.userInfo[PowerAuthErrorDomain];
+    }
+    return nil;
 }
 
 - (PowerAuthExternalPendingOperation*) powerAuthExternalPendingOperation

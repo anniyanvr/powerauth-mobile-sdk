@@ -16,15 +16,16 @@
 
 package io.getlime.security.powerauth.sdk;
 
+import io.getlime.security.powerauth.core.SecureData;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import io.getlime.security.powerauth.core.Password;
-import io.getlime.security.powerauth.integration.support.PowerAuthTestHelper;
+import io.getlime.security.powerauth.exception.PowerAuthErrorCodes;
+import io.getlime.security.powerauth.exception.PowerAuthErrorException;
 import io.getlime.security.powerauth.integration.support.RandomGenerator;
-import io.getlime.security.powerauth.integration.tests.ActivationHelper;
 import io.getlime.security.powerauth.system.PowerAuthLog;
 
 import static org.junit.Assert.*;
@@ -33,140 +34,99 @@ import static org.junit.Assert.*;
 public class PowerAuthAuthenticationTests {
 
     final RandomGenerator randomGenerator;
-    final byte[] customPossessionKey;
-    final byte[] biometryKey;
+    final SecureData customPossessionKey;
+    final SecureData biometryKey;
     final Password password;
     final String stringPassword;
 
     public PowerAuthAuthenticationTests() {
         this.randomGenerator = new RandomGenerator();
-        this.customPossessionKey = randomGenerator.generateBytes(16);
-        this.biometryKey = randomGenerator.generateBytes(16);
+        this.customPossessionKey = SecureData.capture(randomGenerator.generateBytes(16));
+        this.biometryKey = SecureData.capture(randomGenerator.generateBytes(16));
         this.stringPassword = "1234";
         this.password = new Password(stringPassword);
 
         PowerAuthLog.setEnabled(true);
     }
 
-    @Before
-    public void setUp() throws Exception {
-        // disable strict validation mode, we would like to return failures instead of throwing an exception.
-        PowerAuthAuthenticationHelper.setStrictModeForUsageValidation(false);
+    @Test
+    public void testPersistWithPassword() throws Exception {
+        PowerAuthAuthentication authentication = PowerAuthAuthentication.persistWithPassword(password);
+        authentication.validateAuthenticationUsage(true);
+        assertEquals(password, authentication.getPassword());
+
+        authentication = PowerAuthAuthentication.persistWithPassword(stringPassword);
+        authentication.validateAuthenticationUsage(true);
+        assertEquals(password, authentication.getPassword());
     }
 
     @Test
-    public void testCommitWithPassword() throws Exception {
-        PowerAuthAuthentication authentication = PowerAuthAuthentication.commitWithPassword(password);
-        assertTrue(authentication.validateAuthenticationUsage(true));
+    public void testPersisWithPasswordAndBiometry() throws Exception {
+        PowerAuthAuthentication authentication = PowerAuthAuthentication.persistWithPasswordAndBiometry(password, biometryKey);
+        authentication.validateAuthenticationUsage(true);
         assertEquals(password, authentication.getPassword());
+        assertEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
 
-        authentication = PowerAuthAuthentication.commitWithPassword(password, customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(true));
+        authentication = PowerAuthAuthentication.persistWithPasswordAndBiometry(stringPassword, biometryKey);
+        authentication.validateAuthenticationUsage(true);
         assertEquals(password, authentication.getPassword());
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
-
-        authentication = PowerAuthAuthentication.commitWithPassword(stringPassword);
-        assertTrue(authentication.validateAuthenticationUsage(true));
-        assertEquals(password, authentication.getPassword());
-
-        authentication = PowerAuthAuthentication.commitWithPassword(stringPassword, customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(true));
-        assertEquals(password, authentication.getPassword());
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
-    }
-
-    @Test
-    public void testCommitWithPasswordAndBiometry() throws Exception {
-        PowerAuthAuthentication authentication = PowerAuthAuthentication.commitWithPasswordAndBiometry(password, biometryKey);
-        assertTrue(authentication.validateAuthenticationUsage(true));
-        assertEquals(password, authentication.getPassword());
-        assertArrayEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
-
-        authentication = PowerAuthAuthentication.commitWithPasswordAndBiometry(password, biometryKey, customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(true));
-        assertEquals(password, authentication.getPassword());
-        assertArrayEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
-
-        authentication = PowerAuthAuthentication.commitWithPasswordAndBiometry(stringPassword, biometryKey);
-        assertTrue(authentication.validateAuthenticationUsage(true));
-        assertEquals(password, authentication.getPassword());
-        assertArrayEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
-
-        authentication = PowerAuthAuthentication.commitWithPasswordAndBiometry(stringPassword, biometryKey, customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(true));
-        assertEquals(password, authentication.getPassword());
-        assertArrayEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
+        assertEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
     }
 
     @Test
     public void testPossessionOnly() throws Exception {
         PowerAuthAuthentication authentication = PowerAuthAuthentication.possession();
-        assertTrue(authentication.validateAuthenticationUsage(false));
-        assertEquals(1, authentication.getSignatureFactorsMask());
-        
-        authentication = PowerAuthAuthentication.possession(customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(false));
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
-        assertEquals(1, authentication.getSignatureFactorsMask());
+        authentication.validateAuthenticationUsage(false);
+        assertEquals(1, authentication.getAuthenticationCodeFactorsMask());
     }
 
     @Test
     public void testPossessionWithPassword() throws Exception {
         PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword(password);
-        assertTrue(authentication.validateAuthenticationUsage(false));
+        authentication.validateAuthenticationUsage(false);
         assertEquals(password, authentication.getPassword());
-        assertEquals(1 + 2, authentication.getSignatureFactorsMask());
-
-        authentication = PowerAuthAuthentication.possessionWithPassword(password, customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(false));
-        assertEquals(password, authentication.getPassword());
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
-        assertEquals(1 + 2, authentication.getSignatureFactorsMask());
+        assertEquals(1 + 2, authentication.getAuthenticationCodeFactorsMask());
 
         authentication = PowerAuthAuthentication.possessionWithPassword(stringPassword);
-        assertTrue(authentication.validateAuthenticationUsage(false));
+        authentication.validateAuthenticationUsage(false);
         assertEquals(password, authentication.getPassword());
-        assertEquals(1 + 2, authentication.getSignatureFactorsMask());
-
-        authentication = PowerAuthAuthentication.possessionWithPassword(stringPassword, customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(false));
-        assertEquals(password, authentication.getPassword());
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
-        assertEquals(1 + 2, authentication.getSignatureFactorsMask());
+        assertEquals(1 + 2, authentication.getAuthenticationCodeFactorsMask());
     }
 
     @Test
     public void testPossessionWithBiometry() throws Exception {
         PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithBiometry(biometryKey);
-        assertTrue(authentication.validateAuthenticationUsage(false));
-        assertArrayEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
-        assertEquals(1 + 4, authentication.getSignatureFactorsMask());
-
-        authentication = PowerAuthAuthentication.possessionWithBiometry(biometryKey, customPossessionKey);
-        assertTrue(authentication.validateAuthenticationUsage(false));
-        assertArrayEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
-        assertArrayEquals(customPossessionKey, authentication.getOverriddenPossessionKey());
-        assertEquals(1 + 4, authentication.getSignatureFactorsMask());
+        authentication.validateAuthenticationUsage(false);
+        assertEquals(biometryKey, authentication.getBiometryFactorRelatedKey());
+        assertEquals(1 + 4, authentication.getAuthenticationCodeFactorsMask());
     }
 
+    @SuppressWarnings("deprecation")
     @Test
-    public void testLegacyObjectConstructor() throws Exception {
-        PowerAuthAuthentication authentication = new PowerAuthAuthentication();
-        assertFalse(authentication.validateAuthenticationUsage(false));
-        assertFalse(authentication.validateAuthenticationUsage(true));
-    }
+    public void testWrongUsage() {
+        PowerAuthErrorException exception;
+        // wrong usage
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.persistWithPassword(password).validateAuthenticationUsage(false));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.possessionWithPassword(password).validateAuthenticationUsage(true));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
 
-    @Test
-    public void testLegacyObjectConstructorWithStrictMode() throws Exception {
-        PowerAuthAuthenticationHelper.setStrictModeForUsageValidation(true);
-        PowerAuthAuthentication authentication = new PowerAuthAuthentication();
-        try {
-            authentication.validateAuthenticationUsage(false);
-            fail();
-        } catch (IllegalArgumentException e) {
-            // Ignore exception
-        }
+        // deprecated API
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.persistWithPassword(password, customPossessionKey).validateAuthenticationUsage(true));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.persistWithPassword(stringPassword, customPossessionKey).validateAuthenticationUsage(true));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.persistWithPasswordAndBiometry(password, biometryKey, customPossessionKey).validateAuthenticationUsage(true));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.persistWithPasswordAndBiometry(stringPassword, biometryKey, customPossessionKey).validateAuthenticationUsage(true));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.possession(customPossessionKey).validateAuthenticationUsage(false));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.possessionWithPassword(password, customPossessionKey).validateAuthenticationUsage(false));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.possessionWithPassword(stringPassword, customPossessionKey).validateAuthenticationUsage(false));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
+        exception = assertThrows(PowerAuthErrorException.class, () -> PowerAuthAuthentication.possessionWithBiometry(biometryKey, customPossessionKey).validateAuthenticationUsage(false));
+        assertEquals(PowerAuthErrorCodes.WRONG_PARAMETER, exception.getPowerAuthErrorCode());
     }
 }

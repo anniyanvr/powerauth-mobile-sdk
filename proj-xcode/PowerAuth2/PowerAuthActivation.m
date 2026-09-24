@@ -14,14 +14,9 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthActivation.h>
-#import <PowerAuth2/PowerAuthLog.h>
+#import "PowerAuthActivation.h"
+#import "PowerAuthLog.h"
 #import "PA2PrivateMacros.h"
-
-#if defined(DEBUG)
-#import "PA2ObjectSerialization.h"
-#import "PA2CreateActivationRequest.h"
-#endif
 
 @implementation PowerAuthActivation
 
@@ -61,6 +56,12 @@
 #pragma mark - Static initializers
 
 + (instancetype) activationWithActivationCode:(NSString*)activationCode
+                                        error:(NSError**)error
+{
+    return [self activationWithActivationCode:activationCode name:nil error:error];
+}
+
++ (instancetype) activationWithActivationCode:(NSString*)activationCode
                                          name:(NSString*)name
                                         error:(NSError**)error
 {
@@ -79,6 +80,12 @@
 }
 
 + (instancetype) activationWithIdentityAttributes:(NSDictionary<NSString*,NSString*>*)identityAttributes
+                                            error:(NSError**)error
+{
+    return [self activationWithIdentityAttributes:identityAttributes name:nil error:error];
+}
+
++ (instancetype) activationWithIdentityAttributes:(NSDictionary<NSString*,NSString*>*)identityAttributes
                                              name:(NSString*)name
                                             error:(NSError**)error
 {
@@ -94,33 +101,38 @@
                                                               name:name];
 }
 
-+ (instancetype) activationWithRecoveryCode:(NSString*)recoveryCode
-                                recoveryPuk:(NSString*)recoveryPuk
-                                       name:(NSString*)name
-                                      error:(NSError**)error
++ (instancetype) activationWithOidcProviderId:(NSString *)providerId
+                                         code:(NSString *)code
+                                        nonce:(NSString *)nonce
+                                 codeVerifier:(NSString*)codeVerifier
+                                        error:(NSError **)error
 {
-    PowerAuthActivationCode * otp = [PowerAuthActivationCodeUtil parseFromRecoveryCode:recoveryCode];
-    if (!otp) {
+    if (!providerId.length || !code.length || !nonce.length || (codeVerifier && !codeVerifier.length)) {
         if (error) {
-            *error = PA2MakeError(PowerAuthErrorCode_InvalidActivationCode, @"Invalid recovery code");
+            *error = PA2MakeError(PowerAuthErrorCode_InvalidActivationCode, @"Empty activation parameter");
         }
         return nil;
     }
-    if (![PowerAuthActivationCodeUtil validateRecoveryPuk:recoveryPuk]) {
-        if (error) {
-            *error = PA2MakeError(PowerAuthErrorCode_InvalidActivationCode, @"Invalid recovery PUK");
-        }
-        return nil;
+    NSDictionary * identityAttributes;
+    if (codeVerifier) {
+        identityAttributes = @{ @"method": @"oidc", @"providerId": providerId, @"code": code, @"nonce": nonce, @"codeVerifier": codeVerifier };
+    } else {
+        identityAttributes = @{ @"method": @"oidc", @"providerId": providerId, @"code": code, @"nonce": nonce };
     }
-    NSDictionary * identityAttributes = @{ @"recoveryCode" : otp.activationCode, @"puk" : recoveryPuk };
     return [[PowerAuthActivation alloc] initWithIdentityAttributes:identityAttributes
-                                                    activationType:@"RECOVERY"
+                                                    activationType:@"DIRECT"
                                                     activationCode:nil
-                                                              name:name];
+                                                              name:nil];
 }
 
 
 #pragma mark - Customization
+
+- (instancetype) withActivationName:(NSString *)activationName
+{
+    _name = activationName;
+    return self;
+}
 
 - (instancetype) withExtras:(NSString *)extras
 {
@@ -142,48 +154,29 @@
 
 #pragma mark - Validation
 
-- (BOOL) validate
-{
-    return [self validateAndGetError] == nil;
-}
-
-- (NSError*) validateAndGetError
+- (BOOL) validate:(NSError**)error
 {
     if (!_activationType || !_identityAttributes) {
         // May happen from swift, if object is constructed with default objc constructor.
-        return PA2MakeError(PowerAuthErrorCode_WrongParameter, @"Missing activation type or identity attributes.");
+        PA2SetError(error, PowerAuthErrorCode_WrongParameter, @"Missing activation type or identity attributes.");
+        return NO;
     }
     
     if (_additionalActivationOtp) {
         if (![_activationType isEqualToString:@"CODE"]) {
-            return PA2MakeError(PowerAuthErrorCode_InvalidActivationData, @"Only regular activation can be used with additional activation OTP.");
+            PA2SetError(error, PowerAuthErrorCode_InvalidActivationData, @"Only regular activation can be used with additional activation OTP.");
+            return NO;
         }
         if (_additionalActivationOtp.length == 0) {
-            return PA2MakeError(PowerAuthErrorCode_InvalidActivationData, @"Additional activation OTP is empty.");
+            PA2SetError(error, PowerAuthErrorCode_InvalidActivationData, @"Additional activation OTP is empty.");
+            return NO;
         }
     }
-#if defined(DEBUG)
-    // For debug build, try to serialize the custom attributes.
-    if (_customAttributes) {
-        PA2CreateActivationRequest * request = [[PA2CreateActivationRequest alloc] init];
-        request.customAttributes = _customAttributes;
-        @try {
-            NSData * serializedData = [PA2ObjectSerialization serializeObject:request];
-            if (!serializedData) {
-                return PA2MakeError(PowerAuthErrorCode_WrongParameter, @"Failed to serialize customAttributes in PowerAuthActivation");
-            }
-        } @catch (NSException *exception) {
-            NSString * message = [NSString stringWithFormat:@"Failed to serialize customAttributes in PowerAuthActivation: %@", exception.description];
-            return PA2MakeError(PowerAuthErrorCode_WrongParameter, message);
-        }
-    }
-#endif
-    return nil;
+    return YES;
 }
 
 #pragma mark - Debug
 
-#if DEBUG
 - (NSString*) description
 {
     NSMutableString * optional = [NSMutableString string];
@@ -203,6 +196,5 @@
     }
     return [NSString stringWithFormat:@"<PowerAuthActivation type=\"%@\", identity=%@%@>", _activationType, _identityAttributes, optional];
 }
-#endif
 
 @end

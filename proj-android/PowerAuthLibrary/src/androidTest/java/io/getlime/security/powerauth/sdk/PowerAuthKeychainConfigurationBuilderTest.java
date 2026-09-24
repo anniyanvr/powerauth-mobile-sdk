@@ -25,6 +25,7 @@ import io.getlime.security.powerauth.keychain.KeychainProtection;
 
 import static org.junit.Assert.*;
 
+/** @noinspection deprecation*/
 @RunWith(AndroidJUnit4.class)
 public class PowerAuthKeychainConfigurationBuilderTest {
 
@@ -35,7 +36,7 @@ public class PowerAuthKeychainConfigurationBuilderTest {
         assertEquals(PowerAuthKeychainConfiguration.KEYCHAIN_ID_BIOMETRY, configuration.getKeychainBiometryId());
         assertEquals(PowerAuthKeychainConfiguration.KEYCHAIN_ID_STATUS, configuration.getKeychainStatusId());
         assertEquals(PowerAuthKeychainConfiguration.KEYCHAIN_ID_TOKEN_STORE, configuration.getKeychainTokenStoreId());
-        assertEquals(PowerAuthKeychainConfiguration.KEYCHAIN_KEY_BIOMETRY_DEFAULT, configuration.getKeychainBiometryDefaultKey());
+        assertNull(configuration.getKeychainKeyBiometry());
         assertEquals(KeychainProtection.NONE, configuration.getMinimalRequiredKeychainProtection());
         assertFalse(configuration.isConfirmBiometricAuthentication());
         assertTrue(configuration.isLinkBiometricItemsToCurrentSet());
@@ -50,14 +51,14 @@ public class PowerAuthKeychainConfigurationBuilderTest {
                 .keychainBiometryId("keychain.biometry")
                 .keychainStatusId("keychain.status")
                 .keychainTokenStoreId("keychain.tokens")
-                .keychainBiometryDefaultKey("biometryKey")
+                .keychainKeyBiometry("biometryKey")
                 .minimalRequiredKeychainProtection(KeychainProtection.HARDWARE)
                 .authenticateOnBiometricKeySetup(false)
                 .build();
         assertEquals("keychain.biometry", configuration.getKeychainBiometryId());
         assertEquals("keychain.status", configuration.getKeychainStatusId());
         assertEquals("keychain.tokens", configuration.getKeychainTokenStoreId());
-        assertEquals("biometryKey", configuration.getKeychainBiometryDefaultKey());
+        assertEquals("biometryKey", configuration.getKeychainKeyBiometry());
         assertEquals(KeychainProtection.HARDWARE, configuration.getMinimalRequiredKeychainProtection());
         assertTrue(configuration.isConfirmBiometricAuthentication());
         assertFalse(configuration.isLinkBiometricItemsToCurrentSet());

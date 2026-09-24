@@ -1,6 +1,6 @@
-framework module PowerAuthCore {
+// Module specification for Swift PM
+module PowerAuthCore {
   umbrella header "PowerAuthCore.h"
-
   export *
   module * { export * }
 }

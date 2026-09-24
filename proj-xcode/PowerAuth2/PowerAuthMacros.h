@@ -58,7 +58,7 @@
 /**
  Macro for making an implementation for previously declared deprecated class.
  For example: PA2_DEPRECATED_CLASS_IMPL(1.6.0, OldClass, NewClass).
- To ingore deprecated warnings, you can use the following pragma declaration:
+ To ignore deprecated warnings, you can use the following pragma declaration:
  
  #pragma clang diagnostic push
  #pragma clang diagnostic ignored "-Wdeprecated-implementations"
@@ -85,6 +85,7 @@
     #define PA2_EXTERN_C_END
 #endif
 
+#define PA2_NO_EXPORT __attribute__((visibility("hidden")))
 
 #pragma mark - Apple platforms
 
@@ -127,3 +128,7 @@
         #define PA2_MODULE_APPEXT_SDK   1
     #endif
 #endif
+
+// Features
+
+#define PA2_SIMPLIFIED_CONFIG 1 // SDK supports simplified config

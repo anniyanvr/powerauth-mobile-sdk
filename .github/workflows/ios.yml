@@ -1,0 +1,44 @@
+name: iOS Build
+
+on:
+  push:
+    branches:
+      - develop
+      - master
+      - releases/*
+      - feature/crypto4
+    paths:
+      - ".gitmodules"
+      - "cc7"
+      - "scripts/**"
+      - "src/PowerAuth/**"
+      - "src/PowerAuthTests/**"
+      - "include/**"
+      - "proj-xcode/**"
+      - "Package.swift"
+  pull_request:
+    paths:
+      - ".gitmodules"
+      - "cc7"
+      - "scripts/**"
+      - "src/PowerAuth/**"
+      - "src/PowerAuthTests/**"
+      - "include/**"
+      - "proj-xcode/**"
+      - "Package.swift"
+  schedule:
+    - cron: '30 6 * * 1'
+
+jobs:
+  build:
+    name: Build iOS Platform
+    runs-on: macos-latest
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v4
+        with:
+            submodules: 'recursive'
+      - name: Set proper Xcode version
+        run: sudo xcode-select -s "/Applications/Xcode_26.2.app"
+      - name: Build library
+        run: ./scripts/test-build.sh script -v2

@@ -15,16 +15,19 @@
 -keepattributes Signature
 -keepattributes *Annotation*
 
--keep class io.getlime.security.powerauth.core.* {
+-keep class io.getlime.security.powerauth.core.** {
     <init>(...);
+    <methods>;
     <fields>;
 }
+
 -keep class io.getlime.security.powerauth.sdk.impl.PowerAuthPrivateTokenData {
     <fields>;
 }
--keepclassmembers class io.getlime.core.rest.model.** {
+
+-keepclassmembers class io.getlime.core.rest.model.base.** {
     <fields>;
 }
--keepclassmembers class io.getlime.security.powerauth.networking.model.** {
-    <fields>;
-}
+# necessary for R8 fullMode
+-keep, allowobfuscation class io.getlime.core.rest.model.base.**
+-dontwarn lombok.Generated

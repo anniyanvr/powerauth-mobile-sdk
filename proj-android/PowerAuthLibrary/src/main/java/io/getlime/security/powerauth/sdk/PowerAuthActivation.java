@@ -16,6 +16,7 @@
 
 package io.getlime.security.powerauth.sdk;
 
+import android.text.TextUtils;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -26,7 +27,6 @@ import io.getlime.security.powerauth.core.ActivationCode;
 import io.getlime.security.powerauth.core.ActivationCodeUtil;
 import io.getlime.security.powerauth.exception.PowerAuthErrorCodes;
 import io.getlime.security.powerauth.exception.PowerAuthErrorException;
-import io.getlime.security.powerauth.networking.model.entity.ActivationType;
 
 /**
  * The {@code PowerAuthActivation} class contains activation data required for the activation creation.
@@ -34,7 +34,7 @@ import io.getlime.security.powerauth.networking.model.entity.ActivationType;
  */
 public class PowerAuthActivation {
 
-    final @NonNull ActivationType activationType;
+    final @NonNull String activationType;
     final @NonNull Map<String, String> identityAttributes;
     final @Nullable String additionalActivationOtp;
     final @Nullable String activationName;
@@ -45,7 +45,7 @@ public class PowerAuthActivation {
     /**
      * Private object constructor. Use {@link Builder} to construct an instance of the object.
      *
-     * @param activationType {@link ActivationType}.
+     * @param activationType Activation type.
      * @param identityAttributes Identity attributes.
      * @param additionalActivationOtp String with additional activation OTP.
      * @param activationName Optional name of activation.
@@ -53,7 +53,7 @@ public class PowerAuthActivation {
      * @param customAttributes Optional custom attributes.
      * @param activationCode {@link ActivationCode} object, valid in case of regular activation.
      */
-    private PowerAuthActivation(@NonNull ActivationType activationType,
+    private PowerAuthActivation(@NonNull String activationType,
                                 @NonNull Map<String, String> identityAttributes,
                                 @Nullable String additionalActivationOtp,
                                 @Nullable String activationName,
@@ -74,11 +74,11 @@ public class PowerAuthActivation {
      */
     public static class Builder {
 
-        private final @NonNull ActivationType activationType;
+        private final @NonNull String activationType;
         private final @NonNull Map<String, String> identityAttributes;
-        private final @Nullable String activationName;
         private final @Nullable ActivationCode activationCode;
 
+        private @Nullable String activationName;
         private @Nullable String extras;
         private @Nullable Map<String, Object> customAttributes;
         private @Nullable String additionalActivationOtp;
@@ -91,7 +91,7 @@ public class PowerAuthActivation {
          * @param activationName Optional name of activation.
          * @param activationCode {@link ActivationCode} object, valid in case of regular activation.
          */
-        private Builder(@NonNull ActivationType activationType,
+        private Builder(@NonNull String activationType,
                         @NonNull Map<String, String> identityAttributes,
                         @Nullable String activationName,
                         @Nullable ActivationCode activationCode) {
@@ -106,6 +106,57 @@ public class PowerAuthActivation {
          * The activation code may contain an optional signature part, in case that it is scanned
          * from QR code.
          *
+         * @param activationCode Activation code, obtained either via QR code scanning or by manual entry.
+         * @return {@link Builder} instance.
+         * @throws PowerAuthErrorException In case that activation code is invalid.
+         */
+        public static @NonNull Builder activation(@NonNull String activationCode) throws PowerAuthErrorException {
+            return activation(activationCode, null);
+        }
+
+        /**
+         * Construct a {@link Builder} object for an activation via OpenID connect provider.
+         *
+         * @param providerId OAuth 2.0 provider identification.
+         * @param code OAuth 2.0 authorization code.
+         * @param nonce Nonce used in the OAuth 2.0 flow.
+         * @param codeVerifier Optional code verifier, in case that PKCE extension is used for an activation.
+         * @return {@link Builder} instance.
+         * @throws PowerAuthErrorException In case that some parameter contains an empty string.
+         */
+        public static @NonNull Builder oidcActivation(@NonNull String providerId, @NonNull String code, @NonNull String nonce, @Nullable String codeVerifier) throws PowerAuthErrorException {
+            if (TextUtils.isEmpty(providerId) || TextUtils.isEmpty(code) || TextUtils.isEmpty(nonce) || (codeVerifier != null && TextUtils.isEmpty(codeVerifier))) {
+                throw new PowerAuthErrorException(PowerAuthErrorCodes.INVALID_ACTIVATION_DATA, "Empty parameter provided");
+            }
+            final Map<String, String> identityAttributes = new HashMap<>(5);
+            identityAttributes.put("method", "oidc");
+            identityAttributes.put("providerId", providerId);
+            identityAttributes.put("code", code);
+            identityAttributes.put("nonce", nonce);
+            if (codeVerifier != null) {
+                identityAttributes.put("codeVerifier", codeVerifier);
+            }
+            return new Builder(TYPE_DIRECT, identityAttributes, null, null);
+        }
+
+        /**
+         * Construct a {@link Builder} object with an identity attributes for the custom activation purposes.
+         *
+         * @param identityAttributes Custom activation parameters that are used to prove identity of a user.
+         * @return {@link Builder} instance.
+         * @throws PowerAuthErrorException In case that identity attributes map is empty.
+         */
+        public static @NonNull Builder customActivation(@NonNull Map<String, String> identityAttributes) throws PowerAuthErrorException {
+            return customActivation(identityAttributes, null);
+        }
+
+        // Obsolete methods (will be deprecated in some future version)
+
+        /**
+         * Construct a {@link Builder} object for a regular activation with activation code.
+         * The activation code may contain an optional signature part, in case that it is scanned
+         * from QR code.
+         * <p>
          * The activation's name parameter is optional, but recommended to set. You can use the value obtained from
          * {@code Settings.System.getString(getContentResolver(), "device_name")} or let the user set the name.
          * The name of activation will be associated with an activation record on PowerAuth Server.
@@ -122,12 +173,12 @@ public class PowerAuthActivation {
             }
             final Map<String, String> identityAttributes = new HashMap<>(1);
             identityAttributes.put("code", code.activationCode);
-            return new Builder(ActivationType.CODE, identityAttributes, activationName, code);
+            return new Builder(TYPE_CODE, identityAttributes, activationName, code);
         }
 
         /**
          * Construct a {@link Builder} object with an identity attributes for the custom activation purposes.
-         *
+         * <p>
          * The activation's name parameter is optional, but recommended to set. You can use the value obtained from
          * {@code Settings.System.getString(getContentResolver(), "device_name")} or let the user set the name.
          * The name of activation will be associated with an activation record on PowerAuth Server.
@@ -141,39 +192,27 @@ public class PowerAuthActivation {
             if (identityAttributes.isEmpty()) {
                 throw new PowerAuthErrorException(PowerAuthErrorCodes.INVALID_ACTIVATION_DATA, "Empty identity attributes");
             }
-            return new Builder(ActivationType.CUSTOM, identityAttributes, activationName, null);
+            return new Builder(TYPE_CUSTOM, identityAttributes, activationName, null);
         }
 
+        // Activation object customization
+
         /**
-         * Construct a {@link Builder} object with recovery activation code and PUK.
+         * Set activation's name. The activation's name parameter is optional, but recommended to set. You can use the
+         * value obtained from {@code Settings.System.getString(getContentResolver(), "device_name")} or let the user
+         * set the name. The name of activation will be associated with an activation record on PowerAuth Server.
          *
-         * The activation's name parameter is optional, but recommended to set. You can use the value obtained from
-         * {@code Settings.System.getString(getContentResolver(), "device_name")} or let the user set the name.
-         * The name of activation will be associated with an activation record on PowerAuth Server.
-         *
-         * @param recoveryCode Recovery code, obtained either via QR code scanning or by manual entry.
-         * @param puk PUK obtained by manual entry.
-         * @param activationName Activation name to be used for the activation.
-         * @return {@link Builder} instance.
-         * @throws PowerAuthErrorException In case that recovery code or PUK is invalid.
+         * @param activationName Name of the activation.
+         * @return This value will never be {@code null}.
          */
-        public static @NonNull Builder recoveryActivation(@NonNull String recoveryCode, @NonNull String puk, @Nullable String activationName) throws PowerAuthErrorException {
-            final ActivationCode code = ActivationCodeUtil.parseFromRecoveryCode(recoveryCode);
-            if (code == null) {
-                throw new PowerAuthErrorException(PowerAuthErrorCodes.INVALID_ACTIVATION_CODE, "Invalid recovery code");
-            }
-            if (!ActivationCodeUtil.validateRecoveryPuk(puk)) {
-                throw new PowerAuthErrorException(PowerAuthErrorCodes.INVALID_ACTIVATION_CODE, "Invalid recovery PUK");
-            }
-            final Map<String, String> identityAttributes = new HashMap<>(2);
-            identityAttributes.put("recoveryCode", code.activationCode);
-            identityAttributes.put("puk", puk);
-            return new Builder(ActivationType.RECOVERY, identityAttributes, activationName, null);
+        public @NonNull Builder setActivationName(@NonNull String activationName) {
+            this.activationName = activationName;
+            return this;
         }
 
         /**
          * Set extra attributes of the activation, used for application specific purposes (for example, info about the client
-         * device or system). This extras string will be associated with the activation record on PowerAuth Server.
+         * device or system). The extras string will be associated with the activation record on PowerAuth Server.
          *
          * @param extras String with extra attributes
          * @return This value will never be {@code null}.
@@ -218,7 +257,7 @@ public class PowerAuthActivation {
                 if (additionalActivationOtp.isEmpty()) {
                     throw new PowerAuthErrorException(PowerAuthErrorCodes.INVALID_ACTIVATION_DATA, "Additional activation OTP is empty");
                 }
-                if (activationType != ActivationType.CODE) {
+                if (!activationType.equals(TYPE_CODE)) {
                     throw new PowerAuthErrorException(PowerAuthErrorCodes.INVALID_ACTIVATION_DATA, "Only regular activation can be used with additional activation OTP");
                 }
             }
@@ -234,4 +273,8 @@ public class PowerAuthActivation {
             );
         }
     }
+
+    static final String TYPE_CODE = "CODE";
+    static final String TYPE_DIRECT = "DIRECT";
+    static final String TYPE_CUSTOM = "CUSTOM";
 }

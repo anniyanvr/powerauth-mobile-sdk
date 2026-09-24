@@ -14,11 +14,18 @@
  * limitations under the License.
  */
 
-#import <Foundation/Foundation.h>
+#import <PowerAuthCore/PowerAuthCoreMacros.h>
+
+// This interface is also exposed publicly with using PowerAuthLegacyCryptoUtils.h, so
+// we have to use guarding macro to prevent double interface declaration.
+
+#ifndef POWERAUTH_CORE_CRYPTO_UTILS_DEFINED
+#define POWERAUTH_CORE_CRYPTO_UTILS_DEFINED
 
 @class PowerAuthCoreECKeyPair;
 @class PowerAuthCoreECPublicKey;
 @class PowerAuthCoreECPrivateKey;
+@class PowerAuthCoreData;
 
 /**
  The `PowerAuthCoreCryptoUtils` class provides a several general cryptographic primitives
@@ -46,8 +53,8 @@
 /**
  Compute ECDH shared secret.
  */
-+ (nullable NSData*) ecdhComputeSharedSecret:(nonnull PowerAuthCoreECPublicKey*)publicKey
-                              withPrivateKey:(nonnull PowerAuthCoreECPrivateKey*)privateKey;
++ (nullable PowerAuthCoreData*) ecdhComputeSharedSecret:(nonnull PowerAuthCoreECPublicKey*)publicKey
+                                         withPrivateKey:(nonnull PowerAuthCoreECPrivateKey*)privateKey;
 
 /**
  Computes SHA-256 from given data.
@@ -74,6 +81,12 @@
  underlying random generator is broken.
  */
 + (nullable NSData*) randomBytes:(NSUInteger)count;
+
+/**
+ Generates a required amount of random bytes. Returns nil in case that
+ underlying random generator is broken.
+ */
++ (nullable PowerAuthCoreData*) randomCoreData:(NSUInteger)count;
 
 @end
 
@@ -139,3 +152,5 @@
 @property (nonatomic, strong, readonly, nonnull) PowerAuthCoreECPublicKey * publicKey;
 
 @end
+
+#endif // POWERAUTH_CORE_CRYPTO_UTILS_DEFINED

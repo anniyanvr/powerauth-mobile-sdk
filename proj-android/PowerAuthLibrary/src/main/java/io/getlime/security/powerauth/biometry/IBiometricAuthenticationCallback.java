@@ -22,7 +22,7 @@ import androidx.annotation.UiThread;
 import io.getlime.security.powerauth.exception.PowerAuthErrorException;
 
 /**
- * Interface used as a callback for general biometric authentication.
+ * Interface used as a callback for biometric authentication for an internal SDK purposes.
  */
 public interface IBiometricAuthenticationCallback {
 

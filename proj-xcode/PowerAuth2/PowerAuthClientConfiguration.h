@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthMacros.h>
+#import "PowerAuthMacros.h"
 
 /**
  The `PowerAuthClientSslValidationStrategy` protocol defines interface for custom TLS connection validation.
@@ -88,8 +88,10 @@
 /**
  Return the shared in stance of a client configuration object.
  
+ This static method is deprecated. Please use the configuration object created and managed by your application.
+ 
  @return Shared instance of a client configuration.
  */
-+ (nonnull instancetype) sharedInstance;
++ (nonnull instancetype) sharedInstance PA2_DEPRECATED(2.0.0);
 
 @end

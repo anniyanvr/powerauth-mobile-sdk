@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthRestApiError.h>
+#import "PowerAuthRestApiError.h"
 
 /**
  Enum representing the response status: OK, or ERROR
@@ -31,6 +31,6 @@ typedef NS_ENUM(NSInteger, PowerAuthRestApiResponseStatus) {
 
 @property (nonatomic, assign) PowerAuthRestApiResponseStatus status;
 @property (nonatomic, assign) NSUInteger httpStatusCode;
-@property (nonatomic, strong) PowerAuthRestApiError* responseObject;
+@property (nonatomic, strong, nullable) PowerAuthRestApiError* responseObject;
 
 @end

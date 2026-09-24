@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthExternalPendingOperation.h>
+#import "PowerAuthExternalPendingOperation.h"
 
 @implementation PowerAuthExternalPendingOperation
 
@@ -27,6 +27,12 @@
         _externalApplicationId = applicationId;
     }
     return self;
+}
+
+- (NSString*) description
+{
+    return [NSString stringWithFormat:@"<PowerAuthExternalPendingOperation type=%@, appId=\"%@\">",
+            @(_externalOperationType), _externalApplicationId];
 }
 
 @end

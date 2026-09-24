@@ -19,12 +19,13 @@ package io.getlime.security.powerauth.biometry.impl;
 import android.os.Build;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.biometric.BiometricPrompt;
 
 import java.security.InvalidAlgorithmParameterException;
-import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.ProviderException;
@@ -34,12 +35,14 @@ import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.KeyGenerator;
-import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.IvParameterSpec;
 
 import io.getlime.security.powerauth.biometry.BiometricKeyData;
 import io.getlime.security.powerauth.biometry.IBiometricKeyEncryptor;
+import io.getlime.security.powerauth.core.SecureData;
+import io.getlime.security.powerauth.exception.PowerAuthErrorCodes;
+import io.getlime.security.powerauth.exception.PowerAuthErrorException;
 import io.getlime.security.powerauth.system.PowerAuthLog;
 
 /**
@@ -49,9 +52,12 @@ import io.getlime.security.powerauth.system.PowerAuthLog;
  * <p>
  * The cipher configuration is compatible with previous versions of PowerAuth SDK (1.4.3 and older).
  */
-@RequiresApi(api = Build.VERSION_CODES.M)
 public class BiometricKeyEncryptorAes implements IBiometricKeyEncryptor {
 
+    /**
+     * Expected key type stored in KeyStore.
+     */
+    public static final @NonNull String KEY_ALGORITHM = "AES";
     /**
      * Symmetric AES key.
      */
@@ -87,40 +93,52 @@ public class BiometricKeyEncryptorAes implements IBiometricKeyEncryptor {
     }
 
     @Override
+    public int getEncryptorType() {
+        return EncryptorType.AES;
+    }
+
+    @Override
     public boolean isAuthenticationRequiredOnEncryption() {
         return true;
     }
 
-    @Nullable
+    @NonNull
     @Override
-    public Cipher initializeCipher(boolean encryptMode) {
+    public BiometricPrompt.CryptoObject initializeCryptoObject(boolean encryptMode) throws PowerAuthErrorException {
         try {
             if (cipherIsInitialized) {
                 throw new IllegalStateException("Cipher is already initialized");
             }
             cipher = Cipher.getInstance(AES_CIPHER);
-            if (cipher != null) {
-                // We always initialize cipher to encrypt mode, because AES cipher is later used
-                // as KDF function. We don't actually encrypt and decrypt the raw biometric key.
-                final byte[] zero_iv = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-                AlgorithmParameterSpec algorithmSpec = new IvParameterSpec(zero_iv);
-                cipher.init(Cipher.ENCRYPT_MODE, key, algorithmSpec);
-                // Keep encrypt mode flag to be validated later in encrypt / decrypt methods.
-                this.encryptMode = encryptMode;
+            if (cipher == null) {
+                throw new NoSuchAlgorithmException("Failed to initialize " + AES_CIPHER);
             }
-        } catch (ProviderException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidAlgorithmParameterException | InvalidKeyException e) {
-            PowerAuthLog.e("BiometricKeyEncryptorAes.initializeCipher failed: " + e.getMessage());
-            this.cipher = null;
+            // Security Notes
+            //
+            // We always initialize cipher to encrypt mode, because AES cipher is later used
+            // as KDF function. We don't actually encrypt and decrypt the raw biometric key.
+            //
+            // The following zero-IV probably raise a false positive finding in the security review.
+            // We're keeping this mode for a backward compatibility with already created keys.
+            // All new keys will use "BiometricEncryptorMac" for a similar function.
+            final byte[] zero_iv = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            AlgorithmParameterSpec algorithmSpec = new IvParameterSpec(zero_iv);
+            cipher.init(Cipher.ENCRYPT_MODE, key, algorithmSpec);
+            // Keep encrypt mode flag to be validated later in encrypt / decrypt methods.
+            this.encryptMode = encryptMode;
+
+        } catch (Throwable e) {
+            throw PowerAuthErrorException.wrapException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, "Failed to initialize AES biometric key encryptor", e);
         } finally {
             this.cipherIsInitialized = true;
         }
-        return cipher;
+        return new BiometricPrompt.CryptoObject(cipher);
     }
 
     @Nullable
     @Override
-    public BiometricKeyData encryptBiometricKey(@NonNull byte[] key) {
-        final byte[] derivedKey = aesKdf(key, true);
+    public BiometricKeyData encryptBiometricKey(@NonNull SecureData key) {
+        final SecureData derivedKey = aesKdf(key, true);
         // We use AES as KDF, so we must return the provided key back to the application
         // to save it to the persistent storage, to be able to perform the same KDF in decryption.
         return derivedKey != null ? new BiometricKeyData(key, derivedKey, true) : null;
@@ -128,10 +146,10 @@ public class BiometricKeyEncryptorAes implements IBiometricKeyEncryptor {
 
     @Nullable
     @Override
-    public BiometricKeyData decryptBiometricKey(@NonNull byte[] encryptedKey) {
+    public BiometricKeyData decryptBiometricKey(@NonNull SecureData encryptedKey) {
         // Note that "encryptedKey" is actually the same key as was provided to "encryptBiometricKey"
         // method. This is due to fact, that we use AES as KDF.
-        final byte[] derivedKey = aesKdf(encryptedKey, false);
+        final SecureData derivedKey = aesKdf(encryptedKey, false);
         // It's not required to store "dataToSave" after the decryption. We return the same data
         // just for convenience.
         return derivedKey != null ? new BiometricKeyData(encryptedKey, derivedKey, false) : null;
@@ -145,7 +163,7 @@ public class BiometricKeyEncryptorAes implements IBiometricKeyEncryptor {
      * @return Derived data or {@code null} in case of failure.
      */
     @Nullable
-    private byte[] aesKdf(@NonNull byte[] keyToDerive, boolean encryptMode) {
+    private SecureData aesKdf(@NonNull SecureData keyToDerive, boolean encryptMode) {
         try {
             // State checks
             if (cipher == null) {
@@ -160,7 +178,7 @@ public class BiometricKeyEncryptorAes implements IBiometricKeyEncryptor {
             encryptorIsUsed = true;
 
             // Derive the key
-            return cipher.doFinal(keyToDerive);
+            return SecureData.capture(cipher.doFinal(keyToDerive.getSensitiveData()));
         } catch (ProviderException | BadPaddingException | IllegalBlockSizeException e) {
             PowerAuthLog.e("BiometricKeyEncryptorAes.aesKdf failed: " + e.getMessage());
             return null;

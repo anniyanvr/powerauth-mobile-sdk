@@ -24,8 +24,8 @@ import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
 
 import android.text.TextUtils;
+import io.getlime.security.powerauth.core.SecureData;
 
-import java.util.Arrays;
 import java.util.concurrent.Executor;
 
 /**
@@ -38,13 +38,14 @@ public class BiometricAuthenticationRequest {
     private final @NonNull CharSequence title;
     private final @Nullable CharSequence subtitle;
     private final @NonNull CharSequence description;
+    private final @NonNull String keystoreAlias;
     private final boolean forceGenerateNewKey;
     private final boolean invalidateByBiometricEnrollment;
     private final boolean userConfirmationRequired;
-    private final boolean useSymmetricCipher;
-    private final @NonNull byte[] rawKeyData;
+    private final @IBiometricKeyEncryptor.EncryptorType int encryptorType;
+    private final @NonNull SecureData rawKeyData;
     private final @Nullable IBiometricKeyEncryptor biometricKeyEncryptor;
-    private final @Nullable Executor backgroundTaskExecutor;
+    private final @NonNull Executor backgroundTaskExecutor;
 
     private BiometricAuthenticationRequest(
             @NonNull CharSequence title,
@@ -52,23 +53,25 @@ public class BiometricAuthenticationRequest {
             @NonNull CharSequence description,
             @Nullable Fragment fragment,
             @Nullable FragmentActivity fragmentActivity,
+            @NonNull String keystoreAlias,
             boolean forceGenerateNewKey,
             boolean invalidateByBiometricEnrollment,
             boolean userConfirmationRequired,
-            boolean useSymmetricCipher,
-            @NonNull byte[] rawKeyData,
+            @IBiometricKeyEncryptor.EncryptorType int encryptorType,
+            @NonNull SecureData rawKeyData,
             @Nullable IBiometricKeyEncryptor biometricKeyEncryptor,
-            @Nullable Executor backgroundTaskExecutor) {
+            @NonNull Executor backgroundTaskExecutor) {
         this.title = title;
         this.subtitle = subtitle;
         this.description = description;
         this.fragment = fragment;
         this.fragmentActivity = fragmentActivity;
+        this.keystoreAlias = keystoreAlias;
         this.forceGenerateNewKey = forceGenerateNewKey;
         this.invalidateByBiometricEnrollment = invalidateByBiometricEnrollment;
         this.userConfirmationRequired = userConfirmationRequired;
-        this.useSymmetricCipher = useSymmetricCipher;
-        this.rawKeyData = Arrays.copyOf(rawKeyData, rawKeyData.length);
+        this.encryptorType = encryptorType;
+        this.rawKeyData = rawKeyData;
         this.biometricKeyEncryptor = biometricKeyEncryptor;
         this.backgroundTaskExecutor = backgroundTaskExecutor;
     }
@@ -109,6 +112,14 @@ public class BiometricAuthenticationRequest {
     }
 
     /**
+     * @return Alias to Android Keystore for the existing, or the new created key.
+     */
+    @NonNull
+    public String getKeystoreAlias() {
+        return keystoreAlias;
+    }
+
+    /**
      * @return true whether the new biometric key has to be generated as a part of the operation.
      */
     public boolean isForceGenerateNewKey() {
@@ -130,18 +141,19 @@ public class BiometricAuthenticationRequest {
     }
 
     /**
-     * @return {@code true} in case that symmetric cipher should be used for biometric key protection.
+     * @return Type of encryptor used for the biometric key protection.
      */
-    public boolean isUseSymmetricCipher() {
-        return useSymmetricCipher;
+    @IBiometricKeyEncryptor.EncryptorType
+    public int getEncryptorType() {
+        return encryptorType;
     }
 
     /**
      * @return Application provided key which will be protected by the biometric key. The content
      * depends on whether the key is being encrypted (for key setup procedure) or decrypted (for
-     * a signature calculation).
+     * a authentication code calculation).
      */
-    public @NonNull byte[] getRawKeyData() {
+    public @NonNull SecureData getRawKeyData() {
         return rawKeyData;
     }
 
@@ -155,7 +167,7 @@ public class BiometricAuthenticationRequest {
     /**
      * @return {@link Executor} that can execute computational heavy tasks on background thread.
      */
-    public @Nullable Executor getBackgroundTaskExecutor() {
+    public @NonNull Executor getBackgroundTaskExecutor() {
         return backgroundTaskExecutor;
     }
 
@@ -173,11 +185,13 @@ public class BiometricAuthenticationRequest {
         private Fragment fragment;
         private FragmentActivity fragmentActivity;
 
+        private String keystoreAlias;
         private boolean forceGenerateNewKey = false;
         private boolean invalidateByBiometricEnrollment = true;
         private boolean userConfirmationRequired = false;
-        private boolean useSymmetricCipher = true;
-        private byte[] rawKeyData;
+        @IBiometricKeyEncryptor.EncryptorType
+        private int encryptorType = IBiometricKeyEncryptor.EncryptorType.HMAC;
+        private SecureData rawKeyData;
         private IBiometricKeyEncryptor biometricKeyEncryptor;
         private Executor backgroundTaskExecutor;
 
@@ -200,10 +214,13 @@ public class BiometricAuthenticationRequest {
             if (TextUtils.isEmpty(title) || TextUtils.isEmpty(description)) {
                 throw new IllegalArgumentException("Title and description is required.");
             }
+            if (keystoreAlias == null) {
+                throw new IllegalArgumentException("KeyStore alias is required.");
+            }
             if (rawKeyData == null) {
                 throw new IllegalArgumentException("RawKeyData is required.");
             }
-            if (rawKeyData.length < 16) {
+            if (rawKeyData.length() < 16) {
                 throw new IllegalArgumentException("RawKeyData length is insufficient.");
             }
             if (fragment == null && fragmentActivity == null) {
@@ -212,16 +229,20 @@ public class BiometricAuthenticationRequest {
             if (fragment != null && fragmentActivity != null) {
                 throw new IllegalArgumentException("Both Fragment and FragmentActivity are set.");
             }
+            if (backgroundTaskExecutor == null) {
+                throw new IllegalArgumentException("Background task executor must be set.");
+            }
             return new BiometricAuthenticationRequest(
                     title,
                     subtitle,
                     description,
                     fragment,
                     fragmentActivity,
+                    keystoreAlias,
                     forceGenerateNewKey,
                     invalidateByBiometricEnrollment,
                     userConfirmationRequired,
-                    useSymmetricCipher,
+                    encryptorType,
                     rawKeyData,
                     biometricKeyEncryptor,
                     backgroundTaskExecutor);
@@ -318,18 +339,29 @@ public class BiometricAuthenticationRequest {
         }
 
         /**
-         * @param forceGenerateNewKey             If true then the new biometric key will be generated as a
-         *                                        part of the process.
-         * @param invalidateByBiometricEnrollment Sets whether the new key should be invalidated on
-         *                                        biometric enrollment.
-         * @param useSymmetricCipher              If true then symmetric cipher will be used to biometric
-         *                                        factor key protection.
+         * Required: Set alias for a new or existing key stored in the Android Keystore.
+         * @param keystoreAlias Alias to key to create or access.
          * @return This value will never be {@code null}.
          */
-        public Builder setForceGenerateNewKey(boolean forceGenerateNewKey, boolean invalidateByBiometricEnrollment, boolean useSymmetricCipher) {
+        public Builder setKeystoreAlias(@NonNull String keystoreAlias) {
+            this.keystoreAlias = keystoreAlias;
+            return this;
+        }
+
+        /**
+         * @param forceGenerateNewKey             If true then the new biometric key will be generated as a
+         *                                        part of the process.
+         * @param encryptorType                   Type of biometric key encryptor to use.
+         * @param invalidateByBiometricEnrollment Sets whether the new key should be invalidated on
+         *                                        biometric enrollment.
+         * @return This value will never be {@code null}.
+         */
+        public Builder setForceGenerateNewKey(boolean forceGenerateNewKey,
+                                              @IBiometricKeyEncryptor.EncryptorType int encryptorType,
+                                              boolean invalidateByBiometricEnrollment) {
             this.forceGenerateNewKey = forceGenerateNewKey;
             this.invalidateByBiometricEnrollment = invalidateByBiometricEnrollment;
-            this.useSymmetricCipher = useSymmetricCipher;
+            this.encryptorType = encryptorType;
             return this;
         }
 
@@ -354,7 +386,7 @@ public class BiometricAuthenticationRequest {
          * @param keyData Array of bytes containing a key, which will be encrypted by the biometric key.
          * @return This value will never be {@code null}.
          */
-        public Builder setRawKeyData(@NonNull byte[] keyData) {
+        public Builder setRawKeyData(@NonNull SecureData keyData) {
             this.rawKeyData = keyData;
             return this;
         }

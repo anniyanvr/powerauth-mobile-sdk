@@ -17,7 +17,7 @@
 // PA2_SHARED_SOURCE PowerAuth2ForWatch .
 // PA2_SHARED_SOURCE PowerAuth2ForExtensions .
 
-#import <PowerAuth2/PowerAuthMacros.h>
+#import "PowerAuthMacros.h"
 
 /**
  The `PowerAuthSharingConfiguration` class contains configuration required for
@@ -74,7 +74,15 @@
 
 /**
  Validate that the configuration is properly set (all required values were filled in).
+ 
+ Method is deprecated and replaced by throwing `validateConfiguration()` method.
  */
-- (BOOL) validateConfiguration;
+- (BOOL) validateConfiguration PA2_DEPRECATED(2.0.0);
+
+/**
+ Validate that the configuration is properly set (all required values were filled in).
+ */
+- (BOOL) validateConfiguration:(NSError*_Nullable*_Nullable)error
+                NS_SWIFT_NAME(validateConfiguration());
 
 @end

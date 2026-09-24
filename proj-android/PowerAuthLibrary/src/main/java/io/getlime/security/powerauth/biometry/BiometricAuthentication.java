@@ -24,8 +24,6 @@ import androidx.annotation.UiThread;
 import androidx.fragment.app.FragmentManager;
 import android.util.Pair;
 
-import java.util.concurrent.Executor;
-
 import io.getlime.security.powerauth.biometry.impl.BiometricAuthenticator;
 import io.getlime.security.powerauth.biometry.impl.BiometricErrorDialogFragment;
 import io.getlime.security.powerauth.biometry.impl.BiometricHelper;
@@ -36,7 +34,6 @@ import io.getlime.security.powerauth.biometry.impl.IBiometricAuthenticator;
 import io.getlime.security.powerauth.biometry.impl.IBiometricKeyEncryptorProvider;
 import io.getlime.security.powerauth.biometry.impl.PrivateRequestData;
 import io.getlime.security.powerauth.biometry.impl.dummy.DummyBiometricAuthenticator;
-import io.getlime.security.powerauth.biometry.impl.dummy.DummyBiometricKeystore;
 import io.getlime.security.powerauth.exception.PowerAuthErrorCodes;
 import io.getlime.security.powerauth.exception.PowerAuthErrorException;
 import io.getlime.security.powerauth.networking.interfaces.ICancelable;
@@ -57,17 +54,12 @@ import io.getlime.security.powerauth.system.PowerAuthLog;
 public class BiometricAuthentication {
 
   /**
-     * Returns object representing a Keystore used to store biometry related key. If the biometric
-     * authentication is not available on the authenticator, then returns a dummy implementation where
-     * all interface methods fails, or does not provide the required information.
+     * Returns object representing a Keystore used to store biometry related key.
      *
      * @return Object implementing {@link IBiometricKeystore} interface.
      */
     public static @NonNull IBiometricKeystore getBiometricKeystore() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            return new BiometricKeystore();
-        }
-        return new DummyBiometricKeystore();
+        return new BiometricKeystore();
     }
 
 
@@ -135,11 +127,11 @@ public class BiometricAuthentication {
                 @Override
                 public void onBiometricKeyUnavailable() {
                     // Remove the default key, because the biometric key is no longer available.
-                    device.getBiometricKeystore().removeBiometricKeyEncryptor();
+                    device.getBiometricKeystore().removeBiometricKeyEncryptor(request.getKeystoreAlias());
                 }
             });
             final IBiometricKeyEncryptorProvider biometricKeyEncryptorProvider = new DefaultBiometricKeyEncryptorProvider(request, getBiometricKeystore());
-            final PrivateRequestData requestData = new PrivateRequestData(request, biometricKeyEncryptorProvider, dispatcher, ctx.getBiometricDialogResources());
+            final PrivateRequestData requestData = new PrivateRequestData(request, biometricKeyEncryptorProvider, dispatcher, ctx.getBiometricDialogResources(), ctx.isBiometricErrorDialogDisabled());
 
             // Validate request status
             @BiometricStatus int status = device.canAuthenticate();
@@ -149,7 +141,7 @@ public class BiometricAuthentication {
                     if (request.isForceGenerateNewKey() && !biometricKeyEncryptorProvider.isAuthenticationRequiredOnEncryption()) {
                         // Biometric authentication is not actually required, because we're generating (e.g encrypting) the key
                         // and the encryptor doesn't require authentication for such task.
-                        return justEncryptBiometricKey(requestData, dispatcher);
+                        return justEncryptBiometricKey(context, requestData, dispatcher);
                     } else {
                         // Authenticate with device
                         return device.authenticate(context, requestData);
@@ -164,61 +156,66 @@ public class BiometricAuthentication {
                 } catch (IllegalArgumentException e) {
                     // Failed to authenticate due to a wrong configuration.
                     PowerAuthLog.e("BiometricAuthentication.authenticate() failed with exception: " + e.getMessage());
-                    exception = new PowerAuthErrorException(PowerAuthErrorCodes.WRONG_PARAMETER, e.getMessage());
+                    exception = new PowerAuthErrorException(PowerAuthErrorCodes.WRONG_PARAMETER, e.getMessage(), e);
                     status = BiometricStatus.NOT_AVAILABLE;
                 }
             }
             // Failed to use biometric authentication. At first, we should cleanup the possible stored
             // biometric key.
-            device.getBiometricKeystore().removeBiometricKeyEncryptor();
+            device.getBiometricKeystore().removeBiometricKeyEncryptor(request.getKeystoreAlias());
 
             // Now show the error dialog, and report the exception later.
             if (exception == null) {
                 exception = BiometricHelper.getExceptionForBiometricStatus(status);
             }
-            return showErrorDialog(status, exception, context, requestData);
+            if (requestData.isErrorDialogDisabled()) {
+                // Error dialog is disabled, so report the error immediately. Use hint that error should be presented.
+                dispatcher.dispatchError(BiometricErrorInfo.addToException(exception, true));
+                return dispatcher.getCancelableTask();
+            } else {
+                // Error dialog is not disabled, so we can show it. Use hint that error was already presented.
+                return showErrorDialog(status, BiometricErrorInfo.addToException(exception, false), context, requestData);
+            }
         }
     }
 
     /**
      * This helper method only encrypts a raw key data with encryptor and dispatch result back to the
      * application. The encryptor should not require the biometric authentication on it's encrypt task.
-     *
+     * @param context Android context.
      * @param requestData Private request data.
      * @param dispatcher Biometric result dispatcher.
      * @return Result from {@link BiometricResultDispatcher#getCancelableTask()}.
      */
     private static @NonNull ICancelable justEncryptBiometricKey(
+            @NonNull final Context context,
             @NonNull final PrivateRequestData requestData,
             @NonNull final BiometricResultDispatcher dispatcher) {
-        // Prepare an encryption task
-        final Runnable encryptTask = new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    // Acquire encryptor and initialize the cipher
-                    final IBiometricKeyEncryptor encryptor = requestData.getBiometricKeyEncryptorProvider().getBiometricKeyEncryptor();
-                    final boolean initializationSuccess = encryptor.initializeCipher(true) != null;
-                    // Encrypt the key
-                    final BiometricKeyData keyData = initializationSuccess ? encryptor.encryptBiometricKey(requestData.getRequest().getRawKeyData()) : null;
-                    if (keyData == null) {
-                        throw new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, "Failed to encrypt biometric key.");
-                    }
-                    // Success, just dispatch the result back to the application
-                    dispatcher.dispatchSuccess(keyData);
-                } catch (PowerAuthErrorException e) {
-                    // Failure, dispatch error back to the application
-                    dispatcher.dispatchError(e);
+        requestData.getRequest().getBackgroundTaskExecutor().execute(() -> {
+            try {
+                // Acquire encryptor and initialize the cipher
+                final IBiometricKeyEncryptor encryptor = requestData.getBiometricKeyEncryptorProvider().getBiometricKeyEncryptor();
+                encryptor.initializeCryptoObject(true);
+                // Encrypt the key
+                final BiometricKeyData keyData = encryptor.encryptBiometricKey(requestData.getRequest().getRawKeyData());
+                if (keyData == null) {
+                    throw new PowerAuthErrorException(PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE, "Failed to encrypt biometric key.");
+                }
+                // Success, just dispatch the result back to the application
+                dispatcher.dispatchSuccess(keyData);
+            } catch (PowerAuthErrorException exception) {
+                // Failure, dispatch error back to the application
+                if (requestData.isErrorDialogDisabled()) {
+                    // Application should display reason to the user
+                    dispatcher.dispatchError(BiometricErrorInfo.addToException(exception, true));
+                } else {
+                    // Display the error dialog on main thread
+                    dispatcher.dispatchRunnable(() -> {
+                        showErrorDialog(BiometricStatus.NOT_AVAILABLE, BiometricErrorInfo.addToException(exception, false), context, requestData);
+                    });
                 }
             }
-        };
-        // Execute the task on the background or on the current thread.
-        final Executor executor = requestData.getRequest().getBackgroundTaskExecutor();
-        if (executor != null) {
-            executor.execute(encryptTask);
-        } else {
-            encryptTask.run();
-        }
+        });
         return dispatcher.getCancelableTask();
     }
 
@@ -231,6 +228,7 @@ public class BiometricAuthentication {
      * @param requestData Private request data.
      * @return Returns {@link ICancelable} object that allows you to cancel that authentication request.
      */
+    @UiThread
     private static @NonNull ICancelable showErrorDialog(
             @BiometricStatus int status,
             @NonNull final PowerAuthErrorException exception,
@@ -242,7 +240,7 @@ public class BiometricAuthentication {
         final FragmentManager fragmentManager = requestData.getFragmentManager();
 
         final BiometricDialogResources resources = requestData.getResources();
-        final Pair<Integer, Integer> titleDescription = BiometricHelper.getErrorDialogStringsForBiometricStatus(status, resources);
+        final Pair<Integer, Integer> titleDescription = BiometricHelper.getErrorDialogStringsForBiometricStatus(status, resources.strings);
 
         final BiometricErrorDialogFragment dialogFragment = new BiometricErrorDialogFragment.Builder(context)
                 .setTitle(titleDescription.first)
@@ -265,7 +263,7 @@ public class BiometricAuthentication {
         });
 
         // Show fragment
-        dialogFragment.show(fragmentManager, BiometricErrorDialogFragment.FRAGMENT_DEFAULT_TAG);
+        DialogFragmentUtil.showDialogAllowingStateLoss(dialogFragment, fragmentManager, BiometricErrorDialogFragment.FRAGMENT_DEFAULT_TAG);
 
         return cancelableTask;
     }
@@ -304,9 +302,35 @@ public class BiometricAuthentication {
     /**
      * @return Shared instance of {@link BiometricDialogResources} object.
      */
-    public @NonNull BiometricDialogResources getBiometricDialogResources() {
+    public static @NonNull BiometricDialogResources getBiometricDialogResources() {
         synchronized (SharedContext.class) {
             return getContext().getBiometricDialogResources();
+        }
+    }
+
+    /**
+     * Disable or enable error dialog provided by PowerAuth mobile SDK and displayed after failed biometric authentication.
+     * <p>
+     * If set to {@code true}, then the custom error dialog provided by the PowerAuth mobile SDK will never
+     * be displayed in the case of authentication failure. The mobile application should handle all possible error
+     * states using its own UI elements. The default value for this property is {@code false}, and the PowerAuth mobile
+     * SDK may display its own error dialog.
+     *
+     * @param disabled If {@code true}, then the PowerAuth mobile SDK will never display its own error dialog.
+     */
+    public static void setBiometricErrorDialogDisabled(boolean disabled) {
+        synchronized (SharedContext.class) {
+            getContext().setBiometricErrorDialogDisabled(disabled);
+        }
+    }
+
+    /**
+     * Return information whether error dialog provided by PowerAuth mobile SDK is disabled or enabled.
+     * @return {@code true} in case that the PowerAuth mobile SDK will never display its own error dialog, {@code false} otherwise.
+     */
+    public static boolean isBiometricErrorDialogDisabled() {
+        synchronized (SharedContext.class) {
+            return getContext().isBiometricErrorDialogDisabled();
         }
     }
 
@@ -345,6 +369,12 @@ public class BiometricAuthentication {
         private @Nullable IBiometricAuthenticator authenticator;
 
         /**
+         * Contains {@code true} in case that application want's to deal with authentication errors in its own UI.
+         * The default value is {@code false};
+         */
+        private boolean isBiometricErrorDialogDisabled = false;
+
+        /**
          * Contains {@code true} in case that there's already pending biometric authentication.
          */
         private boolean isPendingBiometricAuthentication = false;
@@ -373,6 +403,20 @@ public class BiometricAuthentication {
         }
 
         /**
+         * @param disabled if true, then error dialog provided by PowerAuth mobile SDK will be disabled.
+         */
+        void setBiometricErrorDialogDisabled(boolean disabled) {
+            isBiometricErrorDialogDisabled = disabled;
+        }
+
+        /**
+         * @return true when error dialog provided by PowerAuth mobile SDK is be disabled.
+         */
+        boolean isBiometricErrorDialogDisabled() {
+            return isBiometricErrorDialogDisabled;
+        }
+
+        /**
          * Returns object implementing {@link IBiometricAuthenticator} interface. The returned implementation
          * depends on the version of Android system and on the authenticator's capabilities. If current system
          * doesn't support biometric related APIs, or if the authenticator itself has no biometric sensor
@@ -387,12 +431,9 @@ public class BiometricAuthentication {
             if (authenticator != null) {
                 return authenticator;
             }
-            // If Android 6.0 "Marshmallow" and newer, then try to build authenticator using BiometricPrompt from support lib.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                final IBiometricAuthenticator newAuthenticator = BiometricAuthenticator.createAuthenticator(context, getBiometricKeystore());
-                if (newAuthenticator != null) {
-                    return newAuthenticator;
-                }
+            final IBiometricAuthenticator newAuthenticator = BiometricAuthenticator.createAuthenticator(context, getBiometricKeystore());
+            if (newAuthenticator != null) {
+                return newAuthenticator;
             }
             // Otherwise return dummy authenticator, which provides no biometric functions.
             // In this case, we can cache the authenticator.
@@ -439,7 +480,18 @@ public class BiometricAuthentication {
          */
         @BiometryType int getBiometryType(@NonNull Context context) {
             if (!isBiometryTypeEvaluated) {
-                biometryType = getAuthenticator(context).getBiometryType(context);
+                final IBiometricAuthenticator authenticator = getAuthenticator(context);
+                biometryType = authenticator.getBiometryType(context);
+                if (biometryType == BiometryType.NONE) {
+                    // If reported type is NONE, then try to test whether we can authenticate. If yes, then this is
+                    // a broken device or Android SDK added new type of biometric sensor. In both situations, we
+                    // should report "GENERIC" type.
+                    final int state = authenticator.canAuthenticate();
+                    if (state == BiometricStatus.OK || state == BiometricStatus.NOT_ENROLLED) {
+                        PowerAuthLog.w("BiometricAuthentication: Fallback to BiometryType.GENERIC");
+                        biometryType = BiometryType.GENERIC;
+                    }
+                }
                 isBiometryTypeEvaluated = true;
             }
             return biometryType;

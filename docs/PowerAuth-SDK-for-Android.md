@@ -6,31 +6,38 @@
 - [SDK Installation](#installation)
 - [SDK Configuration](#configuration)
 - [Device Activation](#activation)
-   - [Activation via Activation Code](#activation-via-activation-code)
-   - [Activation via Custom Credentials](#activation-via-custom-credentials)
-   - [Activation via Recovery Code](#activation-via-recovery-code)
-   - [Customize Activation](#customize-activation)
-   - [Committing Activation Data](#committing-activation-data)
-   - [Validating User Inputs](#validating-user-inputs)
+  - [Activation via Activation Code](#activation-via-activation-code)
+  - [Activation via OpenID Connect](#activation-via-openid-connect)
+  - [Activation via Custom Credentials](#activation-via-custom-credentials)
+  - [Customize Activation](#customize-activation)
+  - [Persisting Activation Data](#persisting-activation-data)
+  - [Validating User Inputs](#validating-user-inputs)
 - [Requesting Device Activation Status](#requesting-activation-status)
 - [Data Signing](#data-signing)
-  - [Symmetric Multi-Factor Signature](#symmetric-multi-factor-signature)
+- [Authentication Codes](#authentication-codes)
+  - [Symmetric Multi-Factor Authentication Code](#symmetric-multi-factor-authentication-code)
+  - [Symmetric Offline Multi-Factor Authentication Code](#symmetric-offline-multi-factor-authentication-code)
+- [Digital Signatures](#digital-signatures)
   - [Asymmetric Private Key Signature](#asymmetric-private-key-signature)
-  - [Symmetric Offline Multi-Factor Signature](#symmetric-offline-multi-factor-signature)
+  - [Producing Signed JWT with Provided Claims](#producing-signed-jwt-with-provided-claims)
   - [Verify Server-Signed Data](#verify-server-signed-data)
+  - [Verify JSON Web Signature](#verify-json-web-signature)
+  - [Creating Certificate Signing Request](#creating-certificate-signing-request)
+  - [Getting Device Public Keys](#getting-device-public-keys)
 - [Password Change](#password-change)
 - [Working with passwords securely](#working-with-passwords-securely)
+- [Working with sensitive data](#working-with-sensitive-data)
 - [Biometric Authentication Setup](#biometric-authentication-setup)
 - [Device Activation Removal](#activation-removal)
 - [End-To-End Encryption](#end-to-end-encryption)
 - [Secure Vault](#secure-vault)
-- [Recovery Codes](#recovery-codes)
-   - [Getting Recovery Data](#getting-recovery-data)
-   - [Confirm Recovery Postcard](#confirm-recovery-postcard)
 - [Token-Based Authentication](#token-based-authentication)
+- [Authenticated Protocol Upgrade](#authenticated-protocol-upgrade)
 - [External Encryption Key](#external-encryption-key)
+- [Synchronized Time](#synchronized-time)
 - [Common SDK Tasks](#common-sdk-tasks)
 - [Additional Features](#additional-features)
+  - [Obtaining User's Claims](#obtaining-users-claims)
   - [Password Strength Indicator](#password-strength-indicator)
   - [Debug Build Detection](#debug-build-detection)
   - [Request Interceptors](#request-interceptors)
@@ -46,11 +53,11 @@ repositories {
 }
 
 dependencies {
-    compile 'com.wultra.android.powerauth:powerauth-sdk:1.x.y'
+    implementation 'com.wultra.android.powerauth:powerauth-sdk:2.x.y'
 }
 ```
 
-Note that this documentation is using version `1.x.y` as an example. You can find the latest version in our [List of Releases](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Releases.md). The Android Studio IDE can also find and offer updates for your application's dependencies.
+Note that this documentation is using version `2.x.y` as an example. You can find the latest version in our [List of Releases](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Releases.md). The Android Studio IDE can also find and offer updates for your application's dependencies.
 
 From now on, you can use `PowerAuthSDK` class in your project.
 
@@ -84,9 +91,7 @@ $ mvn clean install -DskipTests=true
 
 In order to be able to configure your `PowerAuthSDK` instance, you need the following values from the PowerAuth Server:
 
-- `APP_KEY` - Application key that binds activation with a specific application.
-- `APP_SECRET` - Application secret that binds activation with a specific application.
-- `KEY_MASTER_SERVER_PUBLIC` - Master Server Public Key, used for non-personalized encryption and server signature verification.
+- `MOBILE_SDK_CONFIG` - String that contains cryptographic configuration.
 
 You also need to specify your instance ID (by default, this can be for example an app package name). This is because one application may use more than one custom instance of `PowerAuthSDK`, and the identifier is the way to distinguish these instances while working with Keychain data.
 
@@ -94,60 +99,98 @@ Finally, you need to know the location of your [PowerAuth Standard RESTful API](
 
 To sum it up, in order to configure the `PowerAuthSDK` default instance, add the following code to your application main activity `onCreate()` method:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val INSTANCE_ID = applicationContext.packageName
-val PA_APPLICATION_KEY = "sbG8gd...MTIzNA=="
-val PA_APPLICATION_SECRET = "aGVsbG...MTIzNA=="
-val PA_MASTER_SERVER_PUBLIC_KEY = "MTIzNDU2Nz...jc4OTAxMg=="
-val API_SERVER = "https://localhost:8080/demo-server"
+val MOBILE_SDK_CONFIG = "MTIzNDU2Nz...jc4OTAxMg=="
+val API_SERVER = "https://<your-domain>/enrollment-server"
 
 try {
     val configuration = PowerAuthConfiguration.Builder(
         INSTANCE_ID,
         API_SERVER,
-        PA_APPLICATION_KEY,
-        PA_APPLICATION_SECRET,
-        PA_MASTER_SERVER_PUBLIC_KEY)
+        MOBILE_SDK_CONFIG)
         .build()
     val powerAuthSDK = PowerAuthSDK.Builder(configuration)
         .build(applicationContext)
 } catch (exception: PowerAuthErrorException) {
-    // Failed to construct `PowerAuthSDK` due to insufficient keychain protection.
-    // (See next chapter for details)
+    when (exception.powerAuthErrorCode) {
+        PowerAuthErrorCodes.INVALID_ACTIVATION_DATA -> {
+            // Activation data format is not recognized
+            // Clear activation data and retry PowerAuthSDK object construction
+            PowerAuthSDK.cleanupInstanceData(applicationContext, configuration)
+        }
+        PowerAuthErrorCodes.INSUFFICIENT_KEYCHAIN_PROTECTION -> {
+            // This device doesn't support the requested level of keychain protection.
+            // See next chapters for details
+        }
+        PowerAuthErrorCodes.UPGRADE_SDK -> {
+            // You have somehow downgraded your application and activation data
+            // is in newer format. You can clear activation data and retry the operation.
+        }
+        else -> Log.d(TAG, "Other error")
+    }    
 }
 ```
-```java
-String INSTANCE_ID = getApplicationContext().getPackageName();
-String PA_APPLICATION_KEY = "sbG8gd...MTIzNA==";
-String PA_APPLICATION_SECRET = "aGVsbG...MTIzNA==";
-String PA_MASTER_SERVER_PUBLIC_KEY = "MTIzNDU2Nz...jc4OTAxMg==";
-String API_SERVER = "https://localhost:8080/demo-server";
 
-try {
-    final PowerAuthConfiguration configuration = new PowerAuthConfiguration.Builder(
-            INSTANCE_ID,
-            API_SERVER,
-            PA_APPLICATION_KEY,
-            PA_APPLICATION_SECRET,
-            PA_MASTER_SERVER_PUBLIC_KEY)
-            .build();
+If you don't provide the application's context to the `build()` method, then PowerAuthSDK will fail to register its components for the application's lifecycle callbacks. To fix this, please use the following code in your application's `onCreate()` method:
 
-    PowerAuthSDK powerAuthSDK = new PowerAuthSDK.Builder(configuration)
-            .build(getApplicationContext());
-
-} catch (PowerAuthErrorException e) {
-    // Failed to construct `PowerAuthSDK` due to insufficient keychain protection.
-    // (See next chapter for details)
-}
+```kotlin
+PowerAuthAppLifecycleListener.getInstance().registerForActivityLifecycleCallbacks(this) // "this" is Application
 ```
-<!-- end -->
+
+
+### Additional configuration
+
+The `PowerAuthConfiguration.Builder` class provides the following additional methods that can alter the configuration:
+
+- `algorithm()` - Alters [algorithm](#algorithms-for-communication) used for the communication with the PowerAuth Server.
+- `offlineAuthenticationCodeComponentLength()` - Alters the default component length for the [offline authentication code](#symmetric-offline-multi-factor-authentication-code). The values between 4 and 8 are allowed. The default value is 8.
+
+### Biometric configuration
+
+The `PowerAuthBiometricConfiguration.Builder` class contains biometric configuration for `PowerAuthSDK` class. It has the following configuration properties:
+
+- `invalidateBiometricFactorAfterChange()` - Function specifies whether the biometric factor key is invalidated if fingers are added or removed, or if the user re-enrolls for face. See [Biometry Factor-Related Key Lifetime](#biometry-factor-related-key-lifetime) chapter for more details.
+- `confirmBiometricAuthentication()` - Function specifies whether the user's confirmation will be required after the successful biometric authentication. See [Biometric Authentication Confirmation](#biometric-authentication-confirmation) chapter for more details.
+- `authenticateOnBiometricKeySetup()` - Function specifies whether setup for biometric factor always require a biometric authentication. See [Enable Biometric Authentication](#enable-biometric-authentication) chapter for more details.
+- `enableFallbackToSharedBiometryKey()` - Function specifies whether `PowerAuthSDK` instance should also do additional lookup for a legacy biometric key, previously shared between multiple `PowerAuthSDK` object instances. The default value is `true` and the fallback is enabled. If your application is using multiple `PowerAuthSDK` instances, then it's recommended to set this option to `false` to avoid use of the shared key between such instances.
+- `useLegacySymmetricKey()` – Specifies whether the `PowerAuthSDK` instance should use the legacy symmetric key for protecting biometric key data. When set to `true`, the legacy AES-KDF from PowerAuth Mobile SDK 1.x is used instead of the newer HMAC-KDF based protection. Keys previously configured under SDK 1.x are unaffected regardless of this setting — this option controls only which KDF is applied when a **new** biometric factor is configured. It is recommended to keep this option set to `false` so that newly enrolled biometric factors use the new HMAC-KDF protection.
+
+
+### HTTP client configuration
+
+The `PowerAuthClientConfiguration.Builder` class contains configuration for a HTTP client used internally by `PowerAuthSDK` class. It has the following configuration properties:
+
+- `timeouts()` - Function specifies connection and read timeout in milliseconds.
+- `allowUnsecuredConnection()` - Enables or disables connection to unsecured servers. Do not use this option in the production build of your application. 
+- `clientValidationStrategy()` - Specifies TLS client validation strategy. See [Working with Invalid SSL Certificates](#working-with-invalid-ssl-certificates) for more details.
+- `requestInterceptor()` - Adds a [request interceptor](#request-interceptors) used by the client before the request is executed.
+- `userAgent()` - Specifies value for User-Agent HTTP request header. See [Custom User-Agent](#custom-user-agent) chapter for more details.
+
+### Keychain configuration
+
+The `PowerAuthKeychainConfiguration.Builder` class contains configuration for a keychain-based storage used by `PowerAuthSDK` class internally. The configuration contains the following properties:
+
+- `minimalRequiredKeychainProtection()` - Function specifies minimal required keychain protection level that must be supported on the current device. See [Activation Data Protection](#activation-data-protection) chapter for more details.
+
+The following properties are also available for configuration but are not recommended to be altered under typical circumstances, as changing them may impact the library’s stability or intended behavior:
+
+- `keychainStatusId()` - Function specifies name of the Keychain file used for storing the status information.
+- `keychainBiometryId()` - Function specifies name of the Keychain file used for storing the biometry key information.
+- `keychainTokenStoreId()` - Function specifies name of the Keychain file used for storing the access tokens.
+- `keychainKeyBiometry()` - Function specifies name of the key to the biometry Keychain to store biometry-factor protection key.
+
+The following properties are deprecated and moved to [Biometric Configuration](#biometric-configuration) class:
+
+- `linkBiometricItemsToCurrentSet()` -  Function specifies whether the item protected with the biometry is invalidated if fingers are added or removed, or if the user re-enrolls for face. See [Biometry Factor-Related Key Lifetime](#biometry-factor-related-key-lifetime) chapter for more details.
+- `confirmBiometricAuthentication()` - Function specifies whether the user's confirmation will be required after the successful biometric authentication. See [Biometric Authentication Confirmation](#biometric-authentication-confirmation) chapter for more details.
+- `authenticateOnBiometricKeySetup()` - Function specifies whether biometric key setup always require a biometric authentication. See [Enable Biometric Authentication](#enable-biometric-authentication) chapter for more details.
+- `enableFallbackToSharedBiometryKey()` - Function specifies whether `PowerAuthSDK` instance should also do additional lookup for a legacy biometric key, previously shared between multiple PowerAuthSDK object instances. The default value is `true` and the fallback is enabled. If your application is using multiple `PowerAuthSDK` instances, then it's recommended to set this option to `false` to avoid use of the shared key between such instances.
 
 ### Activation Data Protection
 
-By default, the PowerAuth Mobile SDK for Android encrypts the local activation data with a symmetric key generated by the Android KeyStore on the Android 6 and newer devices. On older devices, or if the device has an unreliable KeyStore implementation, then the fallback to unencrypted storage, based on private [SharedPreferences](https://developer.android.com/reference/android/content/SharedPreferences) is used. If your application requires a higher level of activation data protection, then you can enforce the level of protection in `PowerAuthKeychainConfiguration`:
+By default, the PowerAuth Mobile SDK for Android encrypts the local activation data with a symmetric key generated by the Android KeyStore on Android 6 and newer devices. On older devices, or if the device has an unreliable KeyStore implementation, then the fallback to unencrypted storage, based on private [SharedPreferences](https://developer.android.com/reference/android/content/SharedPreferences) is used. If your application requires a higher level of activation data protection, then you can enforce the level of protection in `PowerAuthKeychainConfiguration`:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 try {
     val keychainConfig = PowerAuthKeychainConfiguration.Builder()
@@ -161,50 +204,29 @@ try {
     // Failed to construct `PowerAuthSDK` due to insufficient keychain protection.
 }
 ```
-```java
-try {
-    PowerAuthKeychainConfiguration keychainConfig = new PowerAuthKeychainConfiguration.Builder()
-            .minimalRequiredKeychainProtection(KeychainProtection.HARDWARE)
-            .build();
-    // Apply keychain configuration
-    PowerAuthSDK powerAuthSDK = new PowerAuthSDK.Builder(configuration)
-            .keychainConfiguration(keychainConfig)
-            .build(getApplicationContext());
-
-} catch (PowerAuthErrorException e) {
-    // Failed to construct `PowerAuthSDK` due to insufficient keychain protection.
-}
-```
-<!-- end -->
 
 You can also determine the level of keychain protection before `PowerAuthSDK` object creation by calling:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val keychainProtectionLevel = KeychainFactory.getKeychainProtectionSupportedOnDevice(context)
 ```
-```java
-@KeychainProtection int keychainProtectionLevel = KeychainFactory.getKeychainProtectionSupportedOnDevice(context));
-```
-<!-- end -->
 
 The following levels of keychain protection are defined:
 
-- `NONE` - The content of the keychain is not encrypted and therefore not protected. This level of the protection is typically reported on devices older than Android Marshmallow, or in case that the device has faulty KeyStore implementation.
+- `NONE` - The content of the keychain is not encrypted and therefore not protected. This level of protection is typically reported on devices older than Android Marshmallow, or in case the device has faulty KeyStore implementation.
 
-- `SOFTWARE` - The content of the keychain is encrypted with key generated by Android KeyStore, but the key is protected only on the operating system level. The security of the key material relies solely on software measures, which means that a compromise of the Android OS (such as root exploit) might up revealing this key.
+- `SOFTWARE` - The content of the keychain is encrypted with a key generated by Android KeyStore, but the key is protected only on the operating system level. The security of the key material relies solely on software measures, which means that a compromise of the Android OS (such as a "root" exploit) might up revealing this key.
 
-- `HARDWARE` - The content of the keychain is encrypted with key generated by Android KeyStore and the key is stored and managed by [Trusted Execution Environment](https://en.wikipedia.org/wiki/Trusted_execution_environment).
+- `HARDWARE` - The content of the keychain is encrypted with a key generated by Android KeyStore and the key is stored and managed by [Trusted Execution Environment](https://en.wikipedia.org/wiki/Trusted_execution_environment).
 
-- `STRONGBOX` - The content of the keychain is encrypted with key generated by Android KeyStore and the key is stored inside of Secure Element (e.g. StrongBox). This is the highest level of Keychain protection currently available, but not enabled by default. See [note below](#strongbox-support-note).
+- `STRONGBOX` - The content of the keychain is encrypted with a key generated by Android KeyStore and the key is stored inside of Secure Element (e.g. StrongBox). This is the highest level of Keychain protection currently available, but not enabled by default. See [note below](#strongbox-support-note).
 
-Be aware, that enforcing the required level of protection must be properly reflected in your application's user interface. That means that you should inform the user in case that the device has an insufficient capabilities to run your application securely.
+Be aware, that enforcing the required level of protection must be properly reflected in your application's user interface. That means that you should inform the user in case the device has insufficient capabilities to run your application securely.
 
 #### StrongBox Support Note
 
-The StrongBox backed keys are by default turned-off due to poor reliability and low performance of StrongBox implementations on the current Android devices. If you want to turn support on in your application, then use the following code at your application's startup:
+The StrongBox-backed keys are by default turned off due to poor reliability and low performance of StrongBox implementations on the current Android devices. If you want to turn support on in your application, then use the following code at your application's startup:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 try {
     KeychainFactory.setStrongBoxEnabled(context, true)
@@ -213,15 +235,57 @@ try {
     // Basically, you should not create any PowerAuthSDK instance before the change.
 }
 ```
-```java
+
+### Algorithms for Communication
+
+The PowerAuth Mobile SDK supports multiple algorithms for communication with the **PowerAuth Server**. Each algorithm has unique properties, allowing you to choose whether to prioritize security, performance, or a balance of both.
+
+The following algorithms are currently supported:
+
+- `EC_P384_ML_L3` — **default algorithm**  
+  - Provides the best balance between performance and security, including post-quantum resistance.  
+  - Uses a **hybrid** scheme combining P-384–based ECC with ML-KEM-768 and ML-DSA-65 algorithms.  
+  - Requires PowerAuth Server **2.0 or later**.
+
+- `EC_P384_ML_L5`
+  - Provides the highest level of security, including post-quantum resistance.  
+  - Uses a **hybrid** scheme combining P-384–based ECC with ML-KEM-1024 and ML-DSA-87 algorithms.  
+  - Requires PowerAuth Server **2.0 or later**.
+
+- `EC_P384`
+  - Offers excellent performance and stronger security than the legacy protocol V3.3, but is not quantum-resistant.  
+  - This algorithm is based on P-384 ECC and should be used only if your infrastructure cannot yet handle the higher load introduced by post-quantum algorithms.  
+  - Requires PowerAuth Server **2.0 or later**.
+
+- `LEGACY_P256`
+  - Based on P-256 ECC and fully compatible with PowerAuth protocol V3.3.  
+  - Intended to help you migrate your application code to the API changes introduced in PowerAuth Mobile SDK 2.0 while maintaining compatibility with your existing infrastructure. Once your PowerAuth Server is upgraded to version 2.0 or later, you should switch to at least `EC_P384`.  
+  - Requires PowerAuth Server **1.9 or later**.
+
+<!-- begin box info -->
+If you select `LEGACY_P256` algorithm, then SDK may behave slightly different in some rare cases. The rest of the documentation will use **"legacy mode"** or **"legacy activation"** terminology to highlight such situation.
+<!-- end -->
+
+The default algorithm can be overridden by specifying a different one in the SDK configuration:
+
+```kotlin
 try {
-    KeychainFactory.setStrongBoxEnabled(context, true);
-} catch (PowerAuthErrorException e) {
-    // You must alter the configuration before any keychain is accessed.
-    // Basically, you should not create any PowerAuthSDK instance before the change.
+    val configuration = PowerAuthConfiguration.Builder(
+        INSTANCE_ID,
+        API_SERVER,
+        MOBILE_SDK_CONFIG)
+        .algorithm(PowerAuthAlgorithm.EC_P384_ML_L5)
+        .build()
+    val powerAuthSDK = PowerAuthSDK.Builder(configuration)
+        .build(applicationContext)
+} catch (exception: PowerAuthErrorException) {
+    // Failed to construct `PowerAuthSDK` due to insufficient keychain protection.
+    // (See next chapter for details)
 }
 ```
-<!-- end -->
+
+The selected algorithm cannot be changed after a `PowerAuthSDK` instance is created, but it can be updated across the lifetime of your application. If the selected algorithm does not match the one used for the activation currently present on the device, the [authenticated protocol upgrade](#authenticated-protocol-upgrade) process must be performed to switch to the new algorithm.
+
 
 ## Activation
 
@@ -235,7 +299,6 @@ In case you would like to use QR code scanning to enter an activation code, you 
 
 Use the following code to create an activation once you have an activation code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val deviceName = "Petr's Leagoo T5C"
 val activationCode = "VVVVV-VVVVV-VVVVV-VTFVA" // let user type or QR-scan this value
@@ -248,14 +311,12 @@ try {
     // Invalid activation code
 }
 
-// Create a new activation with given activation object
+// Create a new activation with the given activation object
 powerAuthSDK.createActivation(activation, object: ICreateActivationListener {
     override fun onActivationCreateSucceed(result: CreateActivationResult) {
         val fingerprint = result.activationFingerprint
-        val activationRecovery = result.recoveryData
-        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Fingerprint Authentication" switch, ...) and commit
+        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Fingerprint Authentication" switch, ...) and persist
         // The 'fingerprint' value represents the combination of device and server public keys - it may be used as visual confirmation
-        // If server supports recovery codes for activation, then `activationRecovery` contains object with information about activation recovery.
     }
 
     override fun onActivationCreateFailed(t: Throwable) {
@@ -263,50 +324,17 @@ powerAuthSDK.createActivation(activation, object: ICreateActivationListener {
     }
 })
 ```
-```java
-String deviceName = "Petr's Leagoo T5C";
-String activationCode = "VVVVV-VVVVV-VVVVV-VTFVA"; // let user type or QR-scan this value
-
-// Create activation object with given activation code.
-final PowerAuthActivation activation;
-try {
-    activation = PowerAuthActivation.Builder.activation(activationCode, deviceName).build();
-} catch (PowerAuthErrorException e) {
-    // Invalid activation code
-}
-
-// Create a new activation with given activation object
-powerAuthSDK.createActivation(activation, new ICreateActivationListener() {
-    @Override
-    public void onActivationCreateSucceed(CreateActivationResult result) {
-        final String fingerprint = result.getActivationFingerprint();
-        final RecoveryData activationRecovery = result.getRecoveryData();
-        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Fingerprint Authentication" switch, ...) and commit
-        // The 'fingerprint' value represents the combination of device and server public keys - it may be used as visual confirmation
-        // If server supports recovery codes for activation, then `activationRecovery` contains object with information about activation recovery.
-    }
-
-    @Override
-    public void onActivationCreateFailed(Throwable t) {
-        // Error occurred, report it to the user
-    }
-});
-```
-<!-- end -->
-
-If the received activation result also contains recovery data, then you should display that values to the user. To do that, please read the [Getting Recovery Data](#getting-recovery-data) section of this document, which describes how to treat that sensitive information. This is relevant for all types of activation you use.
 
 #### Additional Activation OTP
 
-If an [additional activation OTP](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Additional-Activation-OTP.md) is required to complete the activation, then use the following code to configure the `PowerAuthActivation` object:
+If an [additional activation OTP](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Advanced-Activation-Flows.md#additional-user-authentication-using-activation-otp) is required to complete the activation, then use the following code to configure the `PowerAuthActivation` object:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val deviceName = "Petr's iPhone 7" // or UIDevice.current.name
 val activationCode = "VVVVV-VVVVV-VVVVV-VTFVA" // let user type or QR-scan this value
 val activationOtp = "12345"
 
-// Create activation object with given activation code and OTP.
+// Create an activation object with the given activation code and OTP.
 val activation: PowerAuthActivation
 try {
     activation = PowerAuthActivation.Builder.activation(activationCode, deviceName)
@@ -317,27 +345,47 @@ try {
 }
 // The rest of the activation routine is the same.
 ```
-```java
-String deviceName = "Petr's iPhone 7" // or UIDevice.current.name
-String activationCode = "VVVVV-VVVVV-VVVVV-VTFVA" // let user type or QR-scan this value
-String activationOtp = "12345"
-
-// Create activation object with given activation code and OTP.
-final PowerAuthActivation activation;
-try {
-    activation = PowerAuthActivation.Builder.activation(activationCode, deviceName)
-        .setAdditionalActivationOtp(activationOtp)
-        .build();
-} catch (PowerAuthErrorException e) {
-    // Invalid activation code
-}
-// The rest of the activation routine is the same.
-```
-<!-- end -->
 
 <!-- begin box warning -->
-Be aware that OTP can be used only if the activation is configured for ON_KEY_EXCHANGE validation on the PowerAuth server. See our [crypto documentation for details](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Additional-Activation-OTP.md#regular-activation-with-otp).
+Be aware that OTP can be used only if the activation is configured for ON_KEY_EXCHANGE validation on the PowerAuth server. See our [crypto documentation for details](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Advanced-Activation-Flows.md#regular-activation-with-otp).
 <!-- end -->
+
+### Activation via OpenID Connect
+
+You may also create an activation using OIDC protocol:
+
+```kotlin
+// Create a new activation with a given device name and login credentials
+val deviceName = "Juraj's JiaYu S3"
+// Get the following information from your OpenID provider
+val providerId = "1234567890abcdef"
+val code = "1234567890abcdef"
+val nonce = "K1mP3rT9bQ8lV6zN7sW2xY4dJ5oU0fA1gH29o"
+val codeVerifier = "G3hsI1KZX1o~K0p-5lT3F7yZ4...6yP8rE2wO9n" // code verifier is optional
+
+// Create an activation object with the given credentials.
+val activation: PowerAuthActivation
+try {
+    activation = PowerAuthActivation.Builder.oidcActivation(providerId, code, nonce, codeVerifier)
+                    .setActivationName(deviceName)
+                    .build()
+} catch (e: PowerAuthErrorException) {
+    // Credentials dictionary is empty
+}
+
+// Create a new activation with the given activation object
+powerAuthSDK.createActivation(activation, object: ICreateActivationListener {
+    override fun onActivationCreateSucceed(result: CreateActivationResult) {
+        val fingerprint = result.activationFingerprint
+        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Biometric Authentication" switch, ...) and persist
+        // The 'fingerprint' value represents the combination of device and server public keys - it may be used as visual confirmation
+    }
+
+    override fun onActivationCreateFailed(t: Throwable) {
+        // Error occurred, report it to the user
+    }
+})
+```
 
 ### Activation via Custom Credentials
 
@@ -345,13 +393,12 @@ You may also create an activation using any custom login data - it can be anythi
 
 Use the following code to create an activation using custom credentials:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 // Create a new activation with a given device name and login credentials
 val deviceName = "Juraj's JiaYu S3"
 val credentials = mapOf("username" to "john.doe@example.com", "password" to "YBzBEM")
 
-// Create activation object with given credentials.
+// Create an activation object with the given credentials.
 val activation: PowerAuthActivation
 try {
     activation = PowerAuthActivation.Builder.customActivation(credentials, deviceName).build()
@@ -359,14 +406,12 @@ try {
     // Credentials dictionary is empty
 }
 
-// Create a new activation with given activation object
+// Create a new activation with the given activation object
 powerAuthSDK.createActivation(activation, object: ICreateActivationListener {
     override fun onActivationCreateSucceed(result: CreateActivationResult) {
         val fingerprint = result.activationFingerprint
-        val activationRecovery = result.recoveryData
-        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Biometric Authentication" switch, ...) and commit
+        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Biometric Authentication" switch, ...) and persist
         // The 'fingerprint' value represents the combination of device and server public keys - it may be used as visual confirmation
-        // If server supports recovery codes for activation, then `activationRecovery` contains object with information about activation recovery.
     }
 
     override fun onActivationCreateFailed(t: Throwable) {
@@ -374,134 +419,13 @@ powerAuthSDK.createActivation(activation, object: ICreateActivationListener {
     }
 })
 ```
-```java
-// Create a new activation with a given device name and login credentials
-String deviceName = "Juraj's JiaYu S3";
-Map<String, String> credentials = new HashMap<>();
-credentials.put("username", "john.doe@example.com");
-credentials.put("password", "YBzBEM");
 
-// Create activation object with given credentials.
-final PowerAuthActivation activation;
-try {
-    activation = PowerAuthActivation.Builder.customActivation(credentials, deviceName).build();
-} catch (PowerAuthErrorException e) {
-    // Credentials dictionary is empty
-}
-
-// Create a new activation with given activation object
-powerAuthSDK.createActivation(activation, new ICreateActivationListener() {
-    @Override
-    public void onActivationCreateSucceed(CreateActivationResult result) {
-        final String fingerprint = result.getActivationFingerprint();
-        final RecoveryData activationRecovery = result.getRecoveryData();
-        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Biometric Authentication" switch, ...) and commit
-        // The 'fingerprint' value represents the combination of device and server public keys - it may be used as visual confirmation
-        // If server supports recovery codes for activation, then `activationRecovery` contains object with information about activation recovery.
-    }
-
-    @Override
-    public void onActivationCreateFailed(Throwable t) {
-        // Error occurred, report it to the user
-    }
-});
-```
-<!-- end -->
-
-Note that by using weak identity attributes to create an activation, the resulting activation is confirming a "blurry identity". This may greatly limit the legal weight and usability of a signature. We recommend using a strong identity verification before activation can actually be created.
-
-
-### Activation via Recovery Code
-
-If PowerAuth Server is configured to support [Recovery Codes](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Activation-Recovery.md), then also you can create an activation via the recovery code and PUK.
-
-Use the following code to create an activation using recovery code:
-
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-val deviceName = "John Tramonta"
-val recoveryCode = "55555-55555-55555-55YMA" // User's input
-val puk = "0123456789" // User's input. You should validate RC & PUK with using ActivationCodeUtil
-
-// Create activation object with given recovery code and PUK.
-val activation: PowerAuthActivation
-try {
-    activation = PowerAuthActivation.Builder.recoveryActivation(recoveryCode, puk, deviceName).build();
-} catch (e: PowerAuthErrorException) {
-    // Invalid recovery code or PUK
-}
-
-// Create a new activation with given activation object
-powerAuthSDK.createActivation(activation, object: ICreateActivationListener {
-    override fun onActivationCreateSucceed(result: CreateActivationResult) {
-        val fingerprint = result.activationFingerprint
-        val activationRecovery = result.recoveryData
-        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Biometric Authentication" switch, ...) and commit
-        // The 'fingerprint' value represents the combination of device and server public keys - it may be used as visual confirmation
-        // If server supports recovery codes for activation, then `activationRecovery` contains object with information about activation recovery.
-    }
-
-    override fun onActivationCreateFailed(t: Throwable) {
-        // Error occurred, report it to the user
-        // On top of a regular error processing, you should handle a special situation, when server gives an additional information
-        // about which PUK must be used for the recovery. The information is valid only when recovery code from a postcard is applied.
-        if (t is ErrorResponseApiException) {
-            val errorResponse = t.errorResponse
-            val currentRecoveryPukIndex = t.currentRecoveryPukIndex
-            if (currentRecoveryPukIndex > 0) {
-                // The PUK index is known, you should inform user that it has to rewrite PUK from a specific position.
-            }
-        }
-    }
-})
-```
-```java
-final String deviceName = "John Tramonta"
-final String recoveryCode = "55555-55555-55555-55YMA" // User's input
-final String puk = "0123456789" // User's input. You should validate RC & PUK with using ActivationCodeUtil
-
-// Create activation object with given recovery code and PUK.
-final PowerAuthActivation activation;
-try {
-    activation = PowerAuthActivation.Builder.recoveryActivation(recoveryCode, puk, deviceName).build();
-} catch (PowerAuthErrorException e) {
-    // Invalid recovery code or PUK
-}
-
-// Create a new activation with given activation object
-powerAuthSDK.createActivation(activation, new ICreateActivationListener() {
-    @Override
-    public void onActivationCreateSucceed(CreateActivationResult result) {
-        final String fingerprint = result.getActivationFingerprint();
-        final RecoveryData activationRecovery = result.getRecoveryData();
-        // No error occurred, proceed to credentials entry (PIN prompt, Enable "Biometric Authentication" switch, ...) and commit
-        // The 'fingerprint' value represents the combination of device and server public keys - it may be used as visual confirmation
-        // If server supports recovery codes for activation, then `activationRecovery` contains object with information about activation recovery.
-    }
-
-    @Override
-    public void onActivationCreateFailed(Throwable t) {
-        // Error occurred, report it to the user
-        // On top of a regular error processing, you should handle a special situation, when server gives an additional information
-        // about which PUK must be used for the recovery. The information is valid only when recovery code from a postcard is applied.
-        if (t instanceof ErrorResponseApiException) {
-            ErrorResponseApiException exception = (ErrorResponseApiException) t;
-            Error errorResponse = exception.getErrorResponse();
-            int currentRecoveryPukIndex = exception.getCurrentRecoveryPukIndex();
-            if (currentRecoveryPukIndex > 0) {
-                // The PUK index is known, you should inform user that it has to rewrite PUK from a specific position.
-            }
-        }
-    }
-});
-```
-<!-- end -->
+Note that by using weak identity attributes to create an activation, the resulting activation confirms a "blurry identity". This may greatly limit the legal weight and usability of a signature. We recommend using a strong identity verification before activation can actually be created.
 
 ### Customize Activation
 
-You can set an additional properties to `PowerAuthActivation` object, before any type of activation is created. For example:
+You can set additional properties to `PowerAuthActivation` object before any type of activation is created. For example:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val deviceName = "Petr's Leagoo T5C"
 val activationCode = "VVVVV-VVVVV-VVVVV-VTFVA" // let user type or QR-scan this value
@@ -532,230 +456,117 @@ try {
 }
 // The rest of the activation routine is the same.
 ```
-```java
-String deviceName = "Petr's Leagoo T5C";
-String activationCode = "VVVVV-VVVVV-VVVVV-VTFVA"; // let user type or QR-scan this value
 
-// Custom attributes that can be processed before the activation is created on PowerAuth Server.
-// The dictionary may contain only values that can be serialized to JSON.
-List<String> otherIds = new ArrayList<>();
-otherIds.add("e43f5f99-e2e9-49f2-bcae-5e32a5e96d22");
-otherIds.add("41dd704c-65e6-4d4b-b28f-0bc0e4eb9715");
+### Persisting Activation Data
 
-Map<String, Object> customAttributes = new HashMap<>();
-customAttributes.put("isPrimaryActivation", true);
-customAttributes.put("otherActivationIds", otherIds);
+After you create an activation using one of the methods mentioned above, you need to persist the activation - to use provided user credentials to store the activation data on the device. Use the following code to do this.
 
-// Extra flags that will be associated with the activation record on PowerAuth Server.
-String extraFlags = "EXTRA_FLAGS"
-
-// Now create the activation object with all that extra data
-final PowerAuthActivation activation;
-try {
-    activation = PowerAuthActivation.Builder.activation(activationCode, deviceName)
-            .setCustomAttributes(customAttributes)
-            .setExtras(extraFlags)
-            .build();
-} catch (PowerAuthErrorException e) {
-    // Invalid activation code
-}
-// The rest of the activation routine is the same.
-```  
-<!-- end -->
-
-### Committing Activation Data
-
-After you create an activation using one of the methods mentioned above, you need to commit the activation - to use provided user credentials to store the activation data on the device. Use the following code to do this.
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Commit activation using given PIN
-val result = powerAuthSDK.commitActivationWithPassword(context, pin)
-if (result != PowerAuthErrorCodes.SUCCEED) {
-    // happens only in case SDK was not configured or activation is not in state to be committed
-}
-```
-```java
-// Commit activation using given PIN
-int result = powerAuthSDK.commitActivationWithPassword(context, pin);
-if (result != PowerAuthErrorCodes.SUCCEED) {
-    // happens only in case SDK was not configured or activation is not in state to be committed
-}
-```
-<!-- end -->
-
-This code has created activation with two factors: possession (key stored using a key derived from a device fingerprint) and knowledge (password, in our case, a simple PIN code). If you would like to enable biometric authentication support at this moment, use the following code instead of the one above:
-
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-// Commit activation using given PIN and ad-hoc generated biometric related key
-powerAuthSDK.commitActivation(context, fragment, "Enable Biometric Authentication", "To enable biometric authentication, use the biometric sensor on your device.", pin, object: ICommitActivationWithBiometryListener {
-    override fun onBiometricDialogCancelled() {
-        // Biometric enrolment cancelled by user
+// Persist activation using given PIN
+val authentication = PowerAuthAuthentication.persistWithPassword(pin)
+val cancelable = powerAuthSDK.persistActivationWithAuthentication(context, authentication, object: IPersistActivationListener {
+    override fun onPersistActivationSucceeded() {
+        // Success
     }
 
-    override fun onBiometricDialogSuccess() {
-        // success, activation has been committed
+    override fun onPersistActivationFailed(error: Throwable) {
+        // Failure
     }
 
-    override fun onBiometricDialogFailed(error: PowerAuthErrorException) {
-        // failure, typically as a result of API misuse, or a biometric authentication failure
+    override fun onPersistActivationCancelled(userCancel: Boolean) {
+        if (userCancel) {
+            // user cancelled the biometric authentication dialog
+        } else {
+            // Your application canceled the provided cancelable object
+        }
     }
 })
 ```
-```java
-// Commit activation using given PIN and ad-hoc generated biometric related key
-powerAuthSDK.commitActivation(context, fragment, "Enable Biometric Authentication", "To enable biometric authentication, use the biometric sensor on your device.", pin, new ICommitActivationWithBiometryListener() {
-    @Override
-    public void onBiometricDialogCancelled() {
-        // Biometric enrolment cancelled by user
-    }
 
-    @Override
-    public void onBiometricDialogSuccess() {
-        // success, activation has been committed
-    }
+This code has created activation with two factors: possession (key stored using a key derived from a device fingerprint) and knowledge (password, in our case, a simple PIN code). If you would like to enable biometric authentication support at this moment, use the following code instead of the one above:
 
-    @Override
-    public void onBiometricDialogFailed(@NonNull PowerAuthErrorException error) {
-        // failure, typically as a result of API misuse, or a biometric authentication failure
-    }
-});
-```
-<!-- end -->
-
-Also, you can use the following code to create activation with the best granularity control:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-val authentication = PowerAuthAuthentication.commitWithPasswordAndBiometry(pin, biometryFactorRelatedKey)
-val result = powerAuthSDK.commitActivationWithAuthentication(context, authentication)
-if (result != PowerAuthErrorCodes.SUCCEED) {
-    // happens only in case SDK was not configured or activation is not in state to be committed
-}
-```
-```java
-PowerAuthAuthentication authentication = PowerAuthAuthentication.commitWithPasswordAndBiometry(pin, biometryFactorRelatedKey);
-int result =  powerAuthSDK.commitActivationWithAuthentication(context, authentication);
-if (result != PowerAuthErrorCodes.SUCCEED) {
-    // happens only in case SDK was not configured or activation is not in state to be committed
-}
-```
-<!-- end -->
+// Prepare biometric prompt.
+val biometricPrompt = PowerAuthBiometricPrompt.Builder(parentFragment)  // You can also use fragment activity in the constructor
+                        .setTitle("Enable Biometric Authentication")
+                        .setDescription("To enable biometric authentication, use the biometric sensor on your device.")
+                        .build()
+// Persist activation using given PIN and biometry
+val authentication = PowerAuthAuthentication.persistWithPasswordAndBiometry(pin, biometricPrompt)
+val cancelable = powerAuthSDK.persistActivationWithAuthentication(context, authentication, object: IPersistActivationListener {
+    override fun onPersistActivationSucceeded() {
+        // Success
+    }
 
-Note that you currently need to obtain the biometry factor-related key yourself - you have to use `BiometricPrompt.CryptoObject` or integration with Android `KeyStore` to do so.
+    override fun onPersistActivationFailed(error: Throwable) {
+        // Failure
+    }
+
+    override fun onPersistActivationCancelled(userCancel: Boolean) {
+        if (userCancel) {
+            // user cancelled the biometric authentication dialog
+        } else {
+            // Your application canceled the provided cancelable object
+        }
+    }
+})
+```
+
+If `PowerAuthSDK` is configured to do not authenticate on biometric key setup (e.g. `PowerAuthBiometricConfiguration` has `authenticateOnBiometricKeySetup` set to `false`), then you can use a "dummy" biometric prompt to simplify your code:
+
+```kotlin
+// Prepare biometric prompt.
+val biometricPrompt = PowerAuthBiometricPrompt.noPromptForBiometricKeySetup(parentFragment)
+// Persist activation using given PIN and biometry
+val authentication = PowerAuthAuthentication.persistWithPasswordAndBiometry(pin, biometricPrompt)
+val cancelable = powerAuthSDK.persistActivationWithAuthentication(context, authentication, object: IPersistActivationListener {
+    // Example is the same as above
+})
+```
 
 ### Validating User Inputs
 
-The mobile SDK is providing a couple of functions in `ActivationCodeUtil` class, helping with user input validation. You can:
+The mobile SDK provides a couple of functions in `ActivationCodeUtil` class, helping with user input validation. You can:
 
 - Parse activation code when it's scanned from QR code
 - Validate a whole code at once
-- Validate recovery code or PUK
 - Auto-correct characters typed on the fly
 
 #### Validating Scanned QR Code
 
 To validate an activation code scanned from QR code, you can use `ActivationCodeUtil.parseFromActivationCode()` function. You have to provide the code with or without the signature part. For example:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-val scannedCode = "VVVVV-VVVVV-VVVVV-VTFVA#aGVsbG8.....gd29ybGQ="
-val code = ActivationCodeUtil.parseFromActivationCode(scannedCode);
-if (code?.activationCode == null) {
-    // Invalid code, QR code should contain a signature
+val scannedCode = "VVVVV-VVVVV-VVVVV-VTFVA#MEYCIQD4cqcWloM9PFcdgKemMH4fvXvZhYtm0HU2VI/pCFII8AIhAKGAC3YKjtS0aH99A71JBv27BR7p7gJf+EFsmsGlX5qm"
+val parsed = ActivationCodeUtil.parseFromActivationCode(scannedCode);
+if (parsed == null || parsed?.activationCode == null) {
+    // Invalid code
     return;
 }
+// Extract activation code
+val activationCode = parsed.activationCode
 ```
-```java
-final String scannedCode = "VVVVV-VVVVV-VVVVV-VTFVA#aGVsbG8.....gd29ybGQ=";
-final ActivationCode code = ActivationCodeUtil.parseFromActivationCode(scannedCode);
-if (code == null || code.activationCode == null) {
-    // Invalid code, QR code should contain a signature
-    return;
-}
-```
-<!-- end -->
 
-Note that the signature is only formally validated in the function above. The actual signature verification is done in the activation process, or you can do it on your own:
+The previous versions of PowerAuth Mobile SDK (older than 2.0) allowed you to verify the signature part extracted from a scanned QR code. This is no longer possible due to the fact that PQC signatures are too big to be embedded in a QR code. If the activation code with a signature is used in the activation process, then the signature part is ignored. You can still use `ActivationCodeUtil` class to parse the scanned code and strip the signature part from it as the example above shows.
 
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-val scannedCode = "VVVVV-VVVVV-VVVVV-VTFVA#aGVsbG8......gd29ybGQ="
-val code = ActivationCodeUtil.parseFromActivationCode(scannedCode)
-if (code?.activationCode == null) {
-    return
-}
-val codeBytes = code.activationCode.toByteArray()
-val signatureBytes = Base64.decode(code.activationSignature, Base64.NO_WRAP)
-if (!powerAuthSDK.verifyServerSignedData(codeBytes, signatureBytes, true)) {
-    // Invalid signature
-}
-```
-```java
-final String scannedCode = "VVVVV-VVVVV-VVVVV-VTFVA#aGVsbG8......gd29ybGQ=";
-final ActivationCode code = ActivationCodeUtil.parseFromActivationCode(scannedCode);
-if (code == null || code.activationCode == null) {
-    return;
-}
-final byte[] codeBytes = code.activationCode.getBytes(Charset.defaultCharset());
-final byte[] signatureBytes = Base64.decode(code.activationSignature, Base64.NO_WRAP);
-if (!powerAuthSDK.verifyServerSignedData(codeBytes, signatureBytes, true)) {
-    // Invalid signature
-}
-```
-<!-- end -->
 
 #### Validating Entered Activation Code
 
 To validate an activation code at once, you can call `ActivationCodeUtil.validateActivationCode()` function. You have to provide the code without the signature part. For example:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val isValid = ActivationCodeUtil.validateActivationCode("VVVVV-VVVVV-VVVVV-VTFVA")
 val isInvalid = ActivationCodeUtil.validateActivationCode("VVVVV-VVVVV-VVVVV-VTFVA#aGVsbG8gd29ybGQ=")
 ```
-```java
-boolean isValid   = ActivationCodeUtil.validateActivationCode("VVVVV-VVVVV-VVVVV-VTFVA");
-boolean isInvalid = ActivationCodeUtil.validateActivationCode("VVVVV-VVVVV-VVVVV-VTFVA#aGVsbG8gd29ybGQ=");
-```
-<!-- end -->
 
 If your application is using your own validation, then you should switch to functions provided by SDK. The reason for that is that since SDK `1.0.0`, all activation codes contain a checksum, so it's possible to detect mistyped characters before you start the activation. Check our [Activation Code](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Activation-Code.md) documentation for more details.
 
-#### Validating Recovery Code and PUK
-
-To validate a recovery code at once, you can call `ActivationCodeUtil.validateRecoveryCode()` function. You can provide the whole code, which may or may not contain `"R:"` prefix. So, you can validate manually entered codes, but also codes scanned from QR. For example:
-
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-val isValid1 = ActivationCodeUtil.validateRecoveryCode("VVVVV-VVVVV-VVVVV-VTFVA")
-val isValid2 = ActivationCodeUtil.validateRecoveryCode("R:VVVVV-VVVVV-VVVVV-VTFVA")
-```
-```java
-boolean isValid1 = ActivationCodeUtil.validateRecoveryCode("VVVVV-VVVVV-VVVVV-VTFVA");
-boolean isValid2 = ActivationCodeUtil.validateRecoveryCode("R:VVVVV-VVVVV-VVVVV-VTFVA");
-```
-<!-- end -->
-
-To validate PUK at once, you can call `ActivationCodeUtil.validateRecoveryPuk()` function:
-
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-val isValid = ActivationCodeUtil.validateRecoveryPuk("0123456789")
-```
-```java
-boolean isValid   = ActivationCodeUtil.validateRecoveryPuk("0123456789");
-```
-<!-- end -->
-
 #### Auto-Correcting Typed Characters
 
-You can implement auto-correcting of typed characters with using `ActivationCodeUtil.validateAndCorrectTypedCharacter()` function in screens, where user is supposed to enter an activation or recovery code. This technique is possible due to the fact that Base32 is constructed so that it doesn't contain visually confusing characters. For example, `1` (number one) and `I` (capital I) are confusing, so only `I` is allowed. The benefit is that the provided function can correct typed `1` and translate it to `I`.
+You can implement auto-correcting of typed characters by using `ActivationCodeUtil.validateAndCorrectTypedCharacter()` function in screens, where the user is supposed to enter an activation code. This technique is possible due to the fact that Base32 is constructed so that it doesn't contain visually confusing characters. For example, `1` (number one) and `I` (capital I) are confusing, so only `I` is allowed. The benefit is that the provided function can correct typed `1` and translate it to `I`.
 
 Here's an example how to iterate over the string and validate it character by character:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 /// Returns corrected character or null in case of error.
 fun validateTypedCharacters(input: String): String? {
@@ -778,67 +589,33 @@ fun validateTypedCharacters(input: String): String? {
 // validateTypedCharacter("v1") == "VI"
 // validateTypedCharacter("9") == null
 ```
-```java
-/// Returns corrected character or null in case of error.
-@Nullable String validateTypedCharacters(@NonNull String input) {
-    final int length = input.length();
-    final StringBuilder output = new StringBuilder(length);
-    for (int offset = 0; offset < length; ) {
-        final int codepoint = input.codePointAt(offset);
-        offset += Character.charCount(codepoint);
-        final int corrected = ActivationCodeUtil.validateAndCorrectTypedCharacter(codepoint);
-        if (corrected == 0) {
-            return null;
-        }
-        // Character.isBmpCodePoint(corrected) is always true
-        output.append((char)corrected);
-    }
-    return output.toString();
-}
-
-// validateTypedCharacter("v1") == "VI"
-// validateTypedCharacter("9") == null
-```
-<!-- end -->
 
 ## Requesting Activation Status
 
-To obtain a detailed activation status information, use the following code:
+To obtain detailed activation status information, use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 // Check if there is some activation on the device
 if (powerAuthSDK.hasValidActivation()) {
     // If there is an activation on the device, check the status with server
     powerAuthSDK.fetchActivationStatusWithCallback(context, object: IActivationStatusListener {
-        override fun onActivationStatusSucceed(status: ActivationStatus) {
-            // Activation state: State_Created, State_Pending_Commit, State_Active, State_Blocked, State_Removed, State_Deadlock
+        override fun onActivationStatusSucceed(status: PowerAuthActivationStatus) {
+            // Activation states are explained in detail in "Activation states" chapter below
             when (status.state) {
-                ActivationStatus.State_Pending_Commit ->
-                    // Activation is awaiting commit on the server.
+                PowerAuthActivationState.PENDING_COMMIT ->
                     Log.i(TAG, "Waiting for commit")
-                ActivationStatus.State_Active ->
-                    // Activation is valid and active.
+                PowerAuthActivationState.ACTIVE ->
                     Log.i(TAG, "Activation is active")
-                ActivationStatus.State_Blocked ->
-                    // Activation is blocked. You can display unblock
-                    // instructions to the user.
+                PowerAuthActivationState.BLOCKED ->
                     Log.i(TAG, "Activation is blocked")
-                ActivationStatus.State_Removed -> {
-                    // Activation is no longer valid on the server.
-                    // You can inform user about this situation and remove
-                    // activation locally.
+                PowerAuthActivationState.REMOVED -> {
                     Log.i(TAG, "Activation is no longer valid")
                     powerAuthSDK.removeActivationLocal(context)
                 }
-                ActivationStatus.State_Deadlock -> {
-                    // Local activation is technically blocked and no longer
-                    // can be used for the signature calculations. You can inform
-                    // user about this situation and remove activation locally.
+                PowerAuthActivationState.DEADLOCK -> {
                     Log.i(TAG, "Activation is technically blocked")
                     powerAuthSDK.removeActivationLocal(context)
                 }
-                ActivationStatus.State_Created -> Log.i(TAG, "Unknown state")
                 else -> Log.i(TAG, "Unknown state")
             }
 
@@ -848,6 +625,9 @@ if (powerAuthSDK.hasValidActivation()) {
             val remainingFailCount: Int = status.remainingAttempts
             if (status.customObject != null) {
                 // Custom object contains any proprietary server specific data
+            }
+            if (status.isProtocolUpgradeAvailable) {
+                // Upgrade to new protocol is available
             }
         }
 
@@ -859,520 +639,514 @@ if (powerAuthSDK.hasValidActivation()) {
     // No activation present on device
 }
 ```
-```java
-// Check if there is some activation on the device
-if (powerAuthSDK.hasValidActivation()) {
-    // If there is an activation on the device, check the status with server
-    powerAuthSDK.fetchActivationStatusWithCallback(context, new IActivationStatusListener() {
-        @Override
-        public void onActivationStatusSucceed(ActivationStatus status) {
-            // Activation state: State_Created, State_Pending_Commit, State_Active, State_Blocked, State_Removed, State_Deadlock
-            switch (status.state) {
-                case ActivationStatus.State_Pending_Commit:
-                    // Activation is awaiting commit on the server.
-                    android.util.Log.i(TAG, "Waiting for commit");
-                    break;
-                case ActivationStatus.State_Active:
-                    // Activation is valid and active.
-                    android.util.Log.i(TAG, "Activation is active");
-                    break;
-                case ActivationStatus.State_Blocked:
-                    // Activation is blocked. You can display unblock
-                    // instructions to the user.
-                    android.util.Log.i(TAG, "Activation is blocked");
-                    break;
-                case ActivationStatus.State_Removed:
-                    // Activation is no longer valid on the server.
-                    // You can inform user about this situation and remove
-                    // activation locally.
-                    android.util.Log.i(TAG, "Activation is no longer valid");
-                    powerAuthSDK.removeActivationLocal(context);
-                    break;
-                case ActivationStatus.State_Deadlock:
-                    // Local activation is technically blocked and no longer
-                    // can be used for the signature calculations. You can inform
-                    // user about this situation and remove activation locally.
-                    android.util.Log.i(TAG, "Activation is technically blocked");
-                    powerAuthSDK.removeActivationLocal(context);
-                    break;
-                case ActivationStatus.State_Created:
-                    // Activation is just created. This is the internal
-                    // state on the server and therefore can be ignored
-                    // on the mobile application.
-                default:
-                    android.util.Log.i(TAG, "Unknown state");
-                    break;
-            }
-
-            // Failed login attempts, remaining = max - current
-            int currentFailCount = status.failCount;
-            int maxAllowedFailCount = status.maxFailCount;
-            int remainingFailCount = status.getRemainingAttempts();
-
-            if (status.getCustomObject() != null) {
-                // Custom object contains any proprietary server specific data
-            }
-        }
-
-        @Override
-        public void onActivationStatusFailed(Throwable t) {
-            // Network error occurred, report it to the user
-        }
-    });
-} else {
-    // No activation present on device
-}
-```
-<!-- end -->
 
 Note that the status fetch may fail at an unrecoverable error `PowerAuthErrorCodes.PROTOCOL_UPGRADE`, meaning that it's not possible to upgrade the PowerAuth protocol to a newer version. In this case, it's recommended to [remove the activation locally](#activation-removal).
 
-To get more information about activation lifecycle, check the [Activation States](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Activation.md#activation-states) chapter available in our [powerauth-crypto](https://github.com/wultra/powerauth-crypto) repository.
+### Activation states
+
+This chapter explains activation states in detail. To get more information about activation lifecycle, check the [Activation States](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Activation.md#activation-states) chapter available in our [powerauth-crypto](https://github.com/wultra/powerauth-crypto) repository.
+
+#### `PowerAuthActivationState.CREATED` 
+
+The activation record is created using an external channel, such as the Internet banking, but the key exchange between the client and server did not happen yet. This state is never reported to the mobile client.
+
+#### `PowerAuthActivationState.PENDING_COMMIT`
+
+The activation record is created, and the key exchange between the client and server has already taken place, but the activation record on the server requires additional approval before it can be used. This approval is typically performed through an internet banking platform by the client or handled by an authorized representative in a back office system.
+
+#### `PowerAuthActivationState.ACTIVE`
+
+The activation record is created and active. It is ready to be used for typical use-cases, such as generating authentication codes.
+
+#### `PowerAuthActivationState.BLOCKED`
+
+The activation record is blocked and cannot be used for most use-cases, such as generating authentication codes. While it can be unblocked and activated again, the unblock process cannot be performed locally on the mobile device and requires intervention through an external system, such as internet banking or a back office platform.
+
+#### `PowerAuthActivationState.REMOVED`
+
+The activation record is removed and permanently blocked. It cannot be used for generating authentication codes or ever unblocked. You can inform user about this situation and remove the activation locally.
+
+#### `PowerAuthActivationState.DEADLOCK`
+
+The local activation is technically blocked and can no longer be used for authentication code calculations. You can inform the user about this situation and remove the activation locally.
+
+The reason why the mobile client is no longer capable of calculating valid authentication codes is that the logical counter is out of sync between the client and the server. This may happen only if the mobile client calculates too many PowerAuth authentication codes without subsequent validation on the server. For example:
+
+- If your application repeatedly constructs HTTP requests with a PowerAuth authentication header while the network is unreachable.
+- If your application repeatedly creates authentication tokens while the network is unreachable. For example, when trying to register for push notifications in the background, without user interaction.
+- If you calculate too many offline authentication codes without subsequent validation.
+
+In rare situations, this may also happen in development or testing environments, where you’re able to restore the state of the activation on the server from a snapshot.
 
 ## Data Signing
 
-The main feature of the PowerAuth protocol is data signing. PowerAuth has two types of signatures:
+The main feature of the PowerAuth protocol is data signing. PowerAuth has the following types of signatures:
 
-- **Symmetric Multi-Factor Signature**: Suitable for most operations, such as login, new payment or confirming changes in settings.
-- **Asymmetric Private Key Signature**: Suitable for documents where a strong one-sided signature is desired.
-- **Symmetric Offline Multi-Factor Signature**: Suitable for very secure operations, where the signature is validated over the out-of-band channel.
-- **Verify server signed data**: Suitable for receiving arbitrary data from the server.
+- [Symmetric Multi-Factor Authentication Code](#symmetric-multi-factor-authentication-code): Suitable for most operations, such as login, new payment, or confirming changes in settings.
+- [Symmetric Offline Multi-Factor authentication Code](#symmetric-offline-multi-factor-authentication-code): Suitable for very secure operations, where the authentication code is validated over the out-of-band channel.
+- [Asymmetric Private Key Signature](#sign-data-with-device-private-key): Suitable for documents where a strong one-sided signature is desired.
+- [Verify server signed data](#verify-server-signed-data): Suitable for receiving arbitrary data from the server.
 
-### Symmetric Multi-Factor Signature
+## Authentication Codes
 
-To sign request data, you need to first obtain user credentials (password, PIN code, biometric image) from the user. The task of obtaining the user credentials is used in more use-cases covered by the SDK. The core class is `PowerAuthAuthentication` that holds information about the used authentication factors:
+### Symmetric Multi-Factor Authentication Code
 
-<!-- begin codetabs Kotlin Java -->
+To authenticate the request data, you need to first obtain user credentials (password, PIN code, biometric image) from the user. The task of obtaining the user credentials is used in more use-cases covered by the SDK. The core class is `PowerAuthAuthentication` that holds information about the used authentication factors:
+
 ```kotlin
-// 1FA signature, uses device related key only.
+// 1FA authentication code, uses device related key only.
 val oneFactor = PowerAuthAuthentication.possession()
 
-// 2FA signature, uses device related key and user PIN code.
+// 2FA authentication code - uses device related key and user PIN code.
 val twoFactorPassword = PowerAuthAuthentication.possessionWithPassword("1234")
 
-// 2FA signature, uses biometry factor-related key as a 2nd. factor.
+// 2FA authentication code, uses biometry factor-related key as a 2nd. factor.
 // To obtain biometryFactorRelatedKey see "Fetching the Biometry Factor-Related Key for Authentication" chapter.
 val twoFactorBiometry = PowerAuthAuthentication.possessionWithBiometry(biometryFactorRelatedKey)
 ```
-```java
-// 1FA signature, uses device related key only.
-PowerAuthAuthentication oneFactor = PowerAuthAuthentication.possession();
-
-// 2FA signature, uses device related key and user PIN code.
-PowerAuthAuthentication twoFactorPassword = PowerAuthAuthentication.possessionWithPassword("1234");
-
-// 2FA signature, uses biometry factor-related key as a 2nd. factor.
-// To obtain biometryFactorRelatedKey see "Fetching the Biometry Factor-Related Key for Authentication" chapter.
-PowerAuthAuthentication twoFactorBiometry = PowerAuthAuthentication.possessionWithBiometry(biometryFactorRelatedKey);
-```
-<!-- end -->
 
 When signing `POST`, `PUT` or `DELETE` requests, use request body bytes (UTF-8) as request data and the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// 2FA signature, uses device related key and user PIN code
+// 2FA authentication code - uses device related key and user PIN code
 val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
 
-// Sign POST call with provided data made to URI with custom identifier "/payment/create"
-val header = powerAuthSDK.requestSignatureWithAuthentication(context, authentication, "POST", "/payment/create", requestBodyBytes)
-if (header.isValid) {
+// Compute authentication header for POST call with provided data made to URI with custom identifier "/payment/create"
+try {
+    val header = powerAuthSDK.authenticationHeaderForRequestWithBody(context, authentication, "POST", "/payment/create", requestBodyBytes)
     val httpHeaderKey = header.getKey()
     val httpHeaderValue = header.getValue()
-} else {
-    // In case of invalid configuration, invalid activation state or corrupted state data
+} catch (e: PowerAuthErrorException) {
+    // Handle error
 }
 ```
-```java
-// 2FA signature, uses device related key and user PIN code
-PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
 
-// Sign POST call with provided data made to URI with custom identifier "/payment/create"
-PowerAuthAuthorizationHttpHeader header = powerAuthSDK.requestSignatureWithAuthentication(context, authentication, "POST", "/payment/create", requestBodyBytes);
-if (header.isValid()) {
-    String httpHeaderKey = header.getKey();
-    String httpHeaderValue = header.getValue();
-} else {
-    // In case of invalid configuration, invalid activation state or corrupted state data
-}
-```
-<!-- end -->
+When signing `GET` or `DELETE` request with query parameters, use the following code:
 
-When signing `GET` requests, use the same code as above with normalized request data as described in specification, or (preferably) use the following helper method:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// 2FA signature, uses device related key and user PIN code
+// 2FA authentication code - uses device-related key and user PIN code
 val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
 
-// Sign GET call with provided query parameters made to URI with custom identifier "/payment/create"
+// Compute authentication header for GET call with provided query parameters made to URI with custom identifier "/payment/create"
 val params = mapOf("param1" to "value1", "param2" to "value2")
-
-val header = powerAuthSDK.requestGetSignatureWithAuthentication(context, authentication, "/payment/create", params)
-if (header.isValid) {
+try {
+    val header = powerAuthSDK.authenticationHeaderForRequestWithParams(context, authentication, "GET", "/payment/create", params)
     val httpHeaderKey = header.getKey()
     val httpHeaderValue = header.getValue()
-} else {
-    // In case of invalid configuration, invalid activation state or corrupted state data
+} catch (e: PowerAuthErrorException) {
+    // Handle error
 }
 ```
-```java
-// 2FA signature, uses device related key and user PIN code
-PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
 
-// Sign GET call with provided query parameters made to URI with custom identifier "/payment/create"
-Map<String, String> params = new HashMap<>();
-params.put("param1", "value1");
-params.put("param2", "value2");
+The result of the operation is appropriate HTTP header - you are responsible for hooking up the header value in your request correctly. The process with libraries like `OkHttp` goes like this:
 
-PowerAuthAuthorizationHttpHeader header = powerAuthSDK.requestGetSignatureWithAuthentication(context, authentication, "/payment/create", params);
-if (header.isValid()) {
-    String httpHeaderKey = header.getKey();
-    String httpHeaderValue = header.getValue();
-} else {
-    // In case of invalid configuration, invalid activation state or corrupted state data
-}
-```
-<!-- end -->
-
-The result of the signature is appropriate HTTP header - you are responsible for hooking up the header value in your request correctly. The process with libraries like `OkHttp` goes like this:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 // Prepare the request builder
 val builder: Request.Builder = Builder().url(endpoint)
 
-// Compute PA signature header
-val header = powerAuthSDK.requestSignatureWithAuthentication(context, signatureUnlockKeys, "POST", "/session/login", jsonBody)
-if (!header.isValid) {
-    // request signature failed, for example due to incorrect activation status - cancel the process
-    return
+// Compute PowerAuth authentication header
+try {
+    val header = powerAuthSDK.authenticationHeaderForRequestWithBody(context, authentication, "POST", "/session/login", jsonBody)
+    // Add HTTP header in the request builder
+    builder.header(header.getKey(), header.getValue())
+} catch (e: PowerAuthErrorException) {
+    // Handle error
 }
 
-// Add HTTP header in the request builder
-builder.header(header.getKey(), header.getValue())
-
-// Build the request, send it and process response...
+// Build the request, send it, and process the response...
 // ...
 ```
-```java
-// Prepare the request builder
-final Request.Builder builder = new Request.Builder().url(endpoint);
-
-// Compute PA signature header
-PowerAuthAuthorizationHttpHeader header = powerAuthSDK.requestSignatureWithAuthentication(context, signatureUnlockKeys, "POST", "/session/login", jsonBody);
-if (!header.isValid()) {
-    // request signature failed, for example due to incorrect activation status - cancel the process
-    return;
- }
-
-// Add HTTP header in the request builder
-builder.header(header.getKey(), header.getValue());
-
-// Build the request, send it and process response...
-// ...
-```
-<!-- end -->
 
 #### Request Synchronization
 
-It is recommended that your application executes only one signed request at the time. The reason for that is that our signature scheme is using a counter as a representation of logical time. In other words, the order of request validation on the server is very important. If you issue more that one signed request at the same time, then the order is not guaranteed and therefore one from the requests may fail. On top of that, Mobile SDK itself is using this type of signatures for its own purposes. For example, if you ask for token, then the SDK is using signed request to obtain the token's data. To deal with this problem, Mobile SDK is providing a custom serial `Executor`, which can be used for signed requests execution:
+It is recommended that your application executes only one signed request at the time. The reason for that is that our scheme for authentication codes is using a counter as a representation of logical time. In other words, the order of request validation on the server is very important. If you issue more than one signed request at the same time, then the order is not guaranteed, and therefore one of the requests may fail. On top of that, Mobile SDK itself is using this type of authentication for its own purposes. For example, if you ask for token, then the SDK is using authenticated request to obtain the token's data. To deal with this problem, Mobile SDK is providing a custom serial `Executor`, which can be used for signed requests execution:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 powerAuthSDK.serialExecutor.execute {
     // Recommended practice:
-    // 1. You have to calculate PowerAuth signature here.
+    // 1. You have to calculate the PowerAuth authentication header here.
     // 2. In case that you start yet another asynchronous operation from run(),
     //    then you have to wait for that operation's execution.
 }
 ```
-```java
-final Executor serialExecutor = powerAuthSDK.getSerialExecutor();
-serialExecutor.execute(new Runnable() {
-    @Override
-    public void run() {
-        // Recommended practice:
-        // 1. You have to calculate PowerAuth signature here.
-        // 2. In case that you start yet another asynchronous operation from run(),
-        //    then you have to wait for that operation's execution.
-    }
-});
-```
-<!-- end -->
 
-### Asymmetric Private Key Signature
+### Symmetric Offline Multi-Factor Authentication Code
 
-Asymmetric Private Key Signature uses a private key stored in the PowerAuth secure vault. In order to unlock the secure vault and retrieve the private key, the user has to first authenticate using the symmetric multi-factor signature with at least two factors. This mechanism protects the private key on the device - the server plays a role of a "doorkeeper" and holds the vault unlock key.
+This type of authentication is very similar to [Symmetric Multi-Factor Authentication Code](#symmetric-multi-factor-authentication-code) but the result is provided in the form of a simple, human-readable string (unlike the online version, where the result is an HTTP header). To calculate the code, you need a typical `PowerAuthAuthentication` object to define all required factors, nonce and data to sign. The `nonce` and `data` should also be transmitted to the application over the OOB channel (for example, by scanning a QR code). Then the authentication code calculation is straightforward:
 
-This process is completely transparent on the SDK level. To compute an asymmetric private key signature, request user credentials (password, PIN, biometric image) and use the following code:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 // Prepare the authentication object
 val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
 
-// Get the data to be signed
-val data: ByteArray = this.getMyData()
+powerAuthSDK.offlineAuthenticationCode(context, authentication, "/confirm/offline/operation", data, nonce, object: IOfflineAuthenticationCodeListener {
+    override fun onOfflineAuthenticationCodeSucceed(authenticationCode: String) {
+        Log.d(TAG, "Offline authentication code is: $authenticationCode")
+    }
 
-powerAuthSDK.signDataWithDevicePrivateKey(context, authentication, data, object: IDataSignatureListener {
-    override fun onDataSignedSucceed(signature: ByteArray) {
+    override fun onOfflineAuthenticationCodeFailed(error: Throwable) {
+        // Handle the error, such as biometric authentication cancel.
+    }
+})
+```
+
+The application has to show that calculated code to the user now, and the user has to re-type that code into the web application for the verification.
+
+<!-- begin box info -->
+You can alter the length of the code components by using `offlineAuthenticationCodeComponentLength()` function of `PowerAuthConfiguration.Builder` class.
+<!-- end -->
+
+## Digital Signatures
+
+Digital signatures are another form of data authentication supported in the PowerAuth protocol. The PowerAuth Mobile SDK provides a unified interface for digital signatures, allowing you to compute or verify digital signatures or MAC tokens.
+
+### Signature Key Identifiers
+
+To compute or verify a signature, you must specify the key used for the operation. The following basic key categories are available:
+
+- **"master"** public keys are used to verify data signed by the server. These keys can be used with or without an activation present in the `PowerAuthSDK` instance.
+- **"server"** public keys are personalized keys uniquely associated with an activation. You can use these keys to verify data signed by the server.
+- **"device"** private and public keys are stored locally on the device and associated with an activation. You can use these keys to sign data and to verify previously signed data.
+- **"MAC"** keys are symmetric keys used to verify MACs calculated by the server.
+
+The table below lists all available key identifiers defined in the `PowerAuthSignatureKeyId` enumeration and operations supported with the identifier:
+
+| Key identifier     | Key Type  | Signature       | Activation  | Sign | Verify | Description |
+|--------------------|-----------|-----------------|-------------|------|--------|--------------|
+| `MASTER`           | Any       | Any or Hybrid   | No          | No   | Yes    | Use all available "master" public keys for signature verification. |
+| `MASTER_EC`        | EC        | ECDSA           | No          | No   | Yes    | Use only the EC-based "master" public key for ECDSA signature verification. |
+| `MASTER_ML_DSA`    | ML-DSA    | ML-DSA          | No          | No   | Yes    | Use only the ML-DSA-based "master" public key for ML-DSA signature verification. |
+| `SERVER`           | Any       | Any or Hybrid   | Yes         | No   | Yes    | Use all available "server" public keys for signature verification. |
+| `SERVER_EC`        | EC        | ECDSA           | Yes         | No   | Yes    | Use only the EC-based "server" public key for ECDSA signature verification. |
+| `SERVER_ML_DSA`    | ML-DSA    | ML-DSA          | Yes         | No   | Yes    | Use only the ML-DSA-based "server" public key for ML-DSA signature verification. |
+| `DEVICE`           | Any       | Any or Hybrid   | Yes         | Yes  | Yes    | Use all available "device" private and public keys for signature computation or verification. |
+| `DEVICE_EC`        | EC        | ECDSA           | Yes         | Yes  | Yes    | Use only the EC-based "device" private and public key for ECDSA signature computation or verification. |
+| `DEVICE_ML_DSA`    | ML-DSA    | ML-DSA          | Yes         | Yes  | Yes    | Use only the ML-DSA-based "device" private and public key for ML-DSA signature computation or verification. |
+| `MAC_PERSONALIZED` | MAC       | KMAC            | Yes         | No   | Yes    | Use the KMAC-based symmetric key for MAC verification. |
+
+<!-- begin box info -->
+If you're interested in more technical details, such as the exact algorithms used for digital signatures, see the [Digital-Signatures.md](Digital-Signatures.md) document.
+<!-- end -->
+
+#### Signature Key Availability
+
+The availability of key types depends on the selected [PowerAuth Algorithm](#algorithms-for-communication):
+
+- **"EC"** keys are always available.
+- **"ML_DSA"** keys are available only if the `EC_P384_ML_L3` or `EC_P384_ML_L5` algorithms are used.
+- **"MAC"** keys are available for all algorithms except `LEGACY_P256`.
+
+<!-- begin box warning -->
+If you select a key without specifying its exact type (for example, `.master`), it may lead to multiple key selections. For example, the `EC_P384_ML_L3` and `EC_P384_ML_L5` algorithms use two keys for each key category. The format of hybrid signatures is not yet standardized; therefore, the PowerAuth Mobile SDK supports such key identifiers only in JWS functions. JWS, by design, supports multiple keys in signatures.
+<!-- end -->
+
+### Sign Data With Device Private Key
+
+To compute a digital signature using an asymmetric device private key, request user credentials (such as password or PIN), specify the signing key (always use the "device" key), and use the following code:
+
+```kotlin
+// 2FA authentication — uses the device-related key and user PIN code
+val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
+// Specify the key to sign with. In this case, DEVICE_ML_DSA is used,
+// and therefore an ML-DSA signature will be produced.
+val signingKey = PowerAuthSignatureKeyId.DEVICE_ML_DSA
+// Data to sign
+val data = "hello".getBytes()
+// Calculate signature
+powerAuthSDK.calculateDigitalSignature(context, authentication, data, signingKey, object: IDigitalSignatureListener {
+    override fun onDigitalSignatureSucceed(signature: ByteArray) {
         // Use data signature...
     }
 
-    override fun onDataSignedFailed(t: Throwable) {
+    override fun onDigitalSignatureFailed(throwable: Throwable) {
         // Report error
     }
 })
 ```
-```java
-// Prepare the authentication object
-PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
 
-// Get the data to be signed
-byte[] data = this.getMyData();
-
-powerAuthSDK.signDataWithDevicePrivateKey(context, authentication, data, new IDataSignatureListener() {
-    @Override
-    public void onDataSignedSucceed(byte[] signature) {
-        // Use data signature...
-    }
-
-    @Override
-    public void onDataSignedFailed(Throwable t) {
-        // Report error
-    }
-});
-```
+<!-- begin box info -->
+If the `PowerAuthSDK` instance is not configured for the legacy mode (that is, the algorithm is not `LEGACY_P256`), you can also use biometric authentication to access the device private key.
 <!-- end -->
 
-### Symmetric Offline Multi-Factor Signature
+### Create JSON Web Signature with Device Private Key 
 
-This type of signature is very similar to [Symmetric Multi-Factor Signature](#symmetric-multi-factor-signature) but the result is provided in the form of a simple, human-readable string (unlike the online version, where the result is HTTP header). To calculate the signature, you need a typical `PowerAuthAuthentication` object to define all required factors, nonce and data to sign. The `nonce` and `data` should also be transmitted to the application over the OOB channel (for example, by scanning a QR code). Then the signature calculation is straightforward:
+The asymmetric private key signatures described in the previous chapter can be used to create a [JSON Web Signature (JWS)](https://www.rfc-editor.org/rfc/rfc7515). The example below demonstrates how to construct a JWS from generic data:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Prepare the authentication object
+// 2FA authentication — uses the device-related key and user PIN code
 val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
+// Specify the key to sign with. In this case, DEVICE_ML_DSA is used,
+// and therefore an ML-DSA signature will be produced.
+val signingKey = PowerAuthSignatureKeyId.DEVICE_ML_DSA
+// Data to sign
+val data = "hello".getBytes()
+// Unlock the device private key after successful authentication and perform data signing.
+// - The dataType parameter is added to the JWS Protected Header under the "typ" key.
+//   A null parameter means that no "typ" value is included in the header.
+// - The compact parameter determines whether the output is a JWS (compact = false) or JWT (compact = true).
+powerAuthSDK.calculateJwsSignature(context, authentication, data, null, false, signingKey, object: IJwsSignatureListener {
+    override fun onJwsSignatureSucceed(signedData: String, compactForm: Boolean) {
+        // Use signed data
+    }
 
-val signature = powerAuthSDK.offlineSignatureWithAuthentication(context, authentication, "/confirm/offline/operation", data, nonce)
-if (signature != null) {
-    Log.d(TAG, "Offline signature is: $signature")
-} else {
-    // failure: session is probably invalid, or some required data is missing
-}
+    override fun onJwsSignatureFailed(throwable: Throwable) {
+        // Report error
+    }    
+})
 ```
-```java
-// Prepare the authentication object
-PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
 
-final String signature = powerAuthSDK.offlineSignatureWithAuthentication(context, authentication, "/confirm/offline/operation", data, nonce);
-if (signature != null) {
-    android.util.Log.d(TAG, "Offline signature is: " + signature);
-} else {
-    // failure: session is probably invalid, or some required data is missing
-}
+The following example demonstrates how to construct a signed JWT:
+
+```kotlin
+// Construct claims array
+val claims = mapOf(
+    "sub" to "user-id", 
+    "first_name" to "John",
+    "last_name" to "Appleseed"
+)
+// Convert to JSON bytes
+val claimsData = Gson().toJson(claims).toByteArray()
+// 2FA authentication — uses the device-related key and user PIN code
+val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
+// Specify the key to sign with. In this case, DEVICE_ML_DSA is used,
+// and therefore an ML-DSA signature will be produced.
+val signingKey = PowerAuthSignatureKeyId.DEVICE_ML_DSA
+// Unlock the secure vault, fetch the private key, and perform data signing
+powerAuthSDK.calculateJwsSignature(context, authentication, claimsData, "JWT", true, signingKey, object: IJwsSignatureListener {
+    override fun onJwsSignatureSucceed(signedData: String, compactForm: Boolean) {
+        // Use signed data
+    }
+
+    override fun onJwsSignatureFailed(throwable: Throwable) {
+        // Report error
+    }    
+})
 ```
-<!-- end -->
-
-The application has to show that calculated signature to the user now, and the user has to re-type that code into the web application for the verification.
 
 ### Verify Server-Signed Data
 
-This task is useful whenever you need to receive arbitrary data from the server and you need to be able to verify that the server has issued the data. The PowerAuthSDK provides a high-level method for validating data and associated signature:  
+This task is useful when you receive arbitrary data from the server and need to verify that it was indeed issued by the server. The `PowerAuthSDK` provides a high-level method for validating data and its associated signature:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Validate data signed with the master server key
-if (powerAuthSDK.verifyServerSignedData(data, signature, true)) {
-    // data is signed with server's private master key
-}
-// Validate data signed with the personalized server key
-if (powerAuthSDK.verifyServerSignedData(data, signature, false)) {
-    // data is signed with server's private key
-}  
-```
-```java
-// Validate data signed with the master server key
-if (powerAuthSDK.verifyServerSignedData(data, signature, true)) {
-    // data is signed with server's private master key
-}
-// Validate data signed with the personalized server key
-if (powerAuthSDK.verifyServerSignedData(data, signature, false)) {
-    // data is signed with server's private key
+try {
+    verifyDigitalSignature(signature, signedData, PowerAuthSignatureKeyId.SERVER_ML_DSA)
+    // success, signature is valid
+} catch (exception: PowerAuthErrorException) {
+    // failure
+    if (exception.powerAuthErrorCode == PowerAuthErrorCodes.WRONG_SIGNATURE) {
+        // Invalid signature
+    } else {
+        // Other failure, such as missing activation
+    }
 }
 ```
+
+#### Verify Data Encoded in QR Code
+
+In cases where you need to verify the authenticity of a QR code created on the server and authenticated with a personalized MAC key (for example, when authenticity is bound to an activation), use the `MAC_PERSONALIZED` key identifier. For example:
+
+```kotlin
+try {
+    verifyDigitalSignature(signature, signedData, PowerAuthSignatureKeyId.MAC_PERSONALIZED)
+    // success, MAC is valid
+} catch (exception: PowerAuthErrorException) {
+    // failure
+    if (exception.powerAuthErrorCode == PowerAuthErrorCodes.WRONG_SIGNATURE) {
+        // Invalid MAC
+    } else {
+        // Other failure, such as missing activation
+    }
+}
+```
+
+### Verify JSON Web Signature
+
+To verify a JSON Web Signature (JWS) created on the server, use the following code:
+
+```kotlin
+try {
+    verifyJwsSignature(jws, false, true, PowerAuthSignatureKeyId.SERVER)
+    // success, JWS is valid
+} catch (exception: PowerAuthErrorException) {
+    // failure
+    if (exception.powerAuthErrorCode == PowerAuthErrorCodes.WRONG_SIGNATURE) {
+        // Invalid signature
+    } else {
+        // Other failure, such as missing activation
+    }
+}
+```
+
+Explanation of `verifyJwsSignature` function parameters:
+
+- `signature` - A string containing JWS or JWT signed data.
+- `compactForm` - If `true`, the input string is a compact JWT; otherwise, a full JWS object is expected.
+- `strictVerify` — If `true`, all selected keys must successfully verify their corresponding signatures. If `false`, verification succeeds when at least one provided key matches a valid signature; however, invalid or mismatched signatures still result in an error. It is generally recommended to use `true`, unless you have a specific reason to reduce the strict verification.
+- `keyIdentifier`- The identifier of the key used for verification. Be aware, that this API doesn't support `PowerAuthSignatureKeyId.MAC_PERSONALIZED` key.
+
+<!-- begin box warning -->
+The compact (JWT) format encodes only a single signature, so it is recommended to specify the exact key type (EC, ML-DSA, etc.) for verification. If a generic key identifier is provided (such as `PowerAuthSignatureKeyId.SERVER`), the function may fail when the current algorithm results in multiple key selections. You can relax this behavior by setting the `strict` parameter to `false`, but this is generally not recommended. In non-strict mode, an attacker could potentially remove or replace a stronger PQC signature with a weaker one without detection.
+<!-- end box -->
+
+### Creating Certificate Signing Request
+
+The PowerAuth SDK can create a Certificate Signing Request (CSR) that can be used to request an X.509 certificate from a Public Key Infrastructure (PKI). The CSR contains a device public key generated by the SDK and is signed with the activation-bound private key.
+
+The created CSR is returned in PEM format, including the `-----BEGIN CERTIFICATE REQUEST-----` and `-----END CERTIFICATE REQUEST-----` lines and newline characters (`\n`).
+
+To create a CSR, use the following code:
+
+```kotlin
+val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
+val keyIdentifier = PowerAuthSignatureKeyId.DEVICE_ML_DSA;
+
+powerAuth.createCertificateSigningRequest(
+    appContext, // Android context
+    authentication, // authentication object
+    mapOf( // subject's distinguished names (DN)
+        Pair("CN", "wultra.com"),
+        Pair("O", "Wultra"),
+        Pair("C", "CZ")
+    ),
+    listOf( // subject's alternative names (SAN)
+        "IP: 192.168.1.10",
+        "email: admin@example.com"
+    ),
+    keyIdentifier, // Key Identifier
+    object : ICreateCertificateSigningRequestListener {
+        override fun onCreateCertificateSigningRequestSucceed(certificateSigningRequest: String) {
+            Log.d("CSR", "CSR: ${certificateSigningRequest}")
+            // Use the CSR
+        }
+
+        override fun onCreateCertificateSigningRequestFailed(throwable: Throwable) {
+            // Handle error
+        }
+    }
+)
+```
+
+<!-- begin box info -->
+If the `PowerAuthSDK` instance is not configured for the legacy mode (that is, the algorithm is not `LEGACY_P256`), you can also use biometric authentication to create CSR.
 <!-- end -->
+
+
+### Getting Device Public Keys
+
+Use the following code to retrieve device public keys associated with the activation:
+
+```swift
+try {
+    val keys = exportDevicePublicKeys(PowerAuthDevicePublicKeyFormat.DER)
+    for (key in keys) {
+        if (key.keyType == PowerAuthSignatureKeyType.EC) {
+            println("EC key algorithm: ${key.keyAlgorithm}")
+            println("  X.509 key data: ${Base64.getEncoder().encodeToString(key.keyData)}")
+        } else {
+            println("ML-DSA key algorithm: ${key.keyAlgorithm}")
+            println("       X.509 key data: ${Base64.getEncoder().encodeToString(key.keyData)}")
+        }
+    }
+} catch (exception: PowerAuthErrorException) {
+    // Fail, such as missing activation
+}
+```
+
+Available format specifiers:
+
+- `PowerAuthDevicePublicKeyFormat.DER` - The public key is exported in binary X.509 (DER) format.
+- `PowerAuthDevicePublicKeyFormat.RAW` - The raw key format depends on the key type:
+  - **EC keys**: The output is ASN.1 encoded, as defined in **ANSI X9.63**.
+  - **ML-DSA keys**: The output contains the raw public key obtained via OpenSSL’s `EVP_PKEY_get_raw_public_key()`.
+
 
 ## Password Change
 
-Since the device does not know the password and is unable to verify the password without the help of the server-side, you need to first call an endpoint that verifies a signature computed with the password. SDK offers two ways to do that.
+The typical password-change flow in a mobile application consists of the following steps:
 
-The safe but typically slower way is to use the following code:
+1. **Prompt the user for their current password.**
 
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-// Change password from "oldPassword" to "newPassword".
-powerAuthSDK.changePassword(context, "oldPassword", "newPassword", object: IChangePasswordListener {
-    override fun onPasswordChangeSucceed() {
-        // Password was changed
-    }
+2. **Validate the current password with the server:**
+    ```kotlin
+    powerAuthSDK.beginPasswordChange(context, "oldPassword", object: IBeginPasswordChangeListener {
+        override fun onBeginPasswordChangeSucceed(changeData: PowerAuthPasswordChangeData) {
+            // Password is valid, keep the PowerAuthPasswordChangeData object aside and use in the step 4.
+        }
 
-    override fun onPasswordChangeFailed(t: Throwable) {
-        // Error occurred
-    }
-})
-```
-```java
-// Change password from "oldPassword" to "newPassword".
-powerAuthSDK.changePassword(context, "oldPassword", "newPassword", new IChangePasswordListener() {
-    @Override
-    public void onPasswordChangeSucceed() {
-        // Password was changed
-    }
+        override fun onBeginPasswordChangeFailed(t: Throwable) {
+            // Error occurred.
+        }
+    })
+    ```
+    Keep the received `changeData` object aside for later. If the user cancels the process after this step, you should either release the stored `changeData` object or call `secureClear()` to ensure that all sensitive information is destroyed:
+    ```kotlin
+    changeData.secureClear()
+    ```
 
-    @Override
-    public void onPasswordChangeFailed(Throwable t) {
-        // Error occurred
-    }
-})
-```
-<!-- end -->
+3. **If the current password is valid, allow the user to enter and confirm a new password.**
 
-This method calls `/pa/v3/signature/validate` under the hood with a 2FA signature with provided original password to verify the password correctness.
+4. **Submit the new password to the server:**
+    ```kotlin
+    powerAuthSDK.finishPasswordChange(context, "newPassword", changeData: PowerAuthPasswordChangeData, object: IFinishPasswordChangeListener {
+        override fun onFinishPasswordChangeSucceed() {
+            // Password was changed.
+        }
 
-However, using this method does not usually fit the typical UI workflow of a password change. The method may be used in cases where an old password and a new password are on a single screen, and therefore are both available at the same time. In most mobile apps, however, the user first visits a screen to enter an old password, and then (if the password is OK), the user proceeds to the two-screen flow of a new password setup (select password, confirm password). In other words, the workflow works like this:
-
-1. Show a screen to enter an old password.
-2. Check an old password on the server.
-3. If the old password is OK, then let the user chose and confirm a new one.
-4. Change the password by re-encrypting the activation data.
-
-For this purpose, you can use the following code:
-
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-// [1] Ask for an old password
-val oldPassword = "1234"
-
-// [2] Validate password on the server
-powerAuthSDK.validatePassword(context, oldPassword, object: IValidatePasswordListener {
-    override fun onPasswordValid() {
-        // Proceed to the new password setup
-    }
-
-    override fun onPasswordValidationFailed(t: Throwable) {
-        // Retry entering an old password
-    }
-})
-
-// [3] Ask for new password
-val newPassword = "2468"
-
-// [4] Change the password locally
-powerAuthSDK.changePasswordUnsafe(oldPassword, newPassword)
-```
-```java
-// [1] Ask for an old password
-String oldPassword = "1234";
-
-// [2] Validate password on the server
-powerAuthSDK.validatePassword(context, oldPassword, new IValidatePasswordListener() {
-    @Override
-    public void onPasswordValid() {
-        // Proceed to the new password setup
-    }
-
-    @Override
-    public void onPasswordValidationFailed(Throwable t) {
-        // Retry entering an old password
-    }
-});
-
-// [3] Ask for new password
-String newPassword = "2468";
-
-// [4] Change the password locally
-powerAuthSDK.changePasswordUnsafe(oldPassword, newPassword);
-```
-<!-- end -->
-
-<!-- begin box warning -->
-**Now, beware!** Since the device does not know the actual old password, you need to make sure that the old password is validated before you use it in `unsafeChangePassword`. In case you provide the wrong old password, it will be used to decrypt the original data, and these data will be encrypted using a new password. As a result, the activation data will be broken and irreversibly lost.
-<!-- end -->
-
+        override fun onFinishPasswordChangeFailed(t: Throwable) {
+            // Error occurred.
+        }
+    })
+    ```
 
 ## Working with passwords securely
 
-PowerAuth mobile SDK uses `io.getlime.security.powerauth.core.Password` object behind the scene, to store user's password or PIN securely. The object automatically wipes out the plaintext password on its destroy, so there are no traces of sensitive data left in the memory. You can easily enhance your application's runtime security by adopting this object in your code and this chapter explains in detail how to do it.
+PowerAuth mobile SDK uses the `io.getlime.security.powerauth.core.Password` object behind the scenes, to store the user's password or PIN securely. The object automatically wipes out the plaintext password on its destroy, so there are no traces of sensitive data left in the memory. You can easily enhance your application's runtime security by adopting this object in your code and this chapter explains in detail how to do it.
 
 ### Problem explanation
 
-If you store the user's password in simpe string then there's a high probabilty that the content of the string will remain in the memory until the same region is reused by the underlying memory allocator. This is due the fact that the general memory allocator doesn't cleanup the region of memory being freed. It just update its linked-list of free memory regions for future reuse, so the content of allocated object typically remains intact. This has the following implications to your application:
+If you store the user's password in a simple string, there is a high probability that the content of the string will remain in the memory until the same region is reused by the underlying memory allocator. This is because the general memory allocator doesn't clean up the region of memory being freed. It just updates its linked-list of free memory regions for future reuse, so the content of the allocated object typically remains intact. This has the following implications for your application:
 
-- If your application is using system keyboard to enter the password or PIN, then the sensitive data will remain in memory in multiple copies for a while. 
+- If your application is using a system keyboard to enter the password or PIN, then the sensitive data will remain in memory in multiple copies for a while. 
 
 - If the device's memory is not stressed enough, then the application may remain in memory active for days.
 
-The situation that the user's password stays in memory for days may be critical in situations when the attacker has the device in possession. For example, if device is lost or is in repair shop. To minimize the risks, the `Password` object does the following things:
+The situation that the user's password stays in memory for days may be critical in situations when the attacker has the device in possession. For example, if the device is lost or is in a repair shop. To minimize the risks, the `Password` object does the following things:
 
-- Always keeps user's password scrambled with a random data, so it cannot be easily found by simple string search. The password in plaintext is revealed only for a short and well defined time when it's needed for the cryptographic operation.
+- Always keeps the user's password scrambled with random data, so it cannot be easily found by simple string search. The password in plaintext is revealed only for a short and well-defined time when it's needed for the cryptographic operation.
 
-- Always clears buffer with the sensitive data before the object's destruction.
+- Always clear buffer with the sensitive data before the object's destruction.
 
-- Doesn't provide a simple interface to reveal the password in plaintext<sup>1)</sup> and therefore it minimizes the risks of revealing the password by accident (like print it to the log).
+- Doesn't provide a simple interface to reveal the password in plaintext<sup>1)</sup> and therefore it minimizes the risks of revealing the password by accident (like printing it to the log).
 
 <!-- begin box info -->
-**Note 1:** There's `validatePasswordComplexity()` function that reveal the password in plaintext for the limited time for the complexity validation purposes. The straightforward naming of the function allows you to find all its usages in your code and properly validate all codepaths.
+**Note 1:** There's a `validatePasswordComplexity()` function that reveals the password in plaintext for a limited time for complexity validation purposes. The straightforward naming of the function allows you to find all its usages in your code and properly validate all code paths.
 <!-- end -->
 
 ### Special password object usage
 
-PowerAuth mobile SDK allows you to use both strings and special password objects at input, so it's up to you which way fits best for your purposes. For simplicity, this documentation is using strings for the passwords, but all code examples can be changed to utilize `Password` object as well. For example, this is the modified code for [Password Change](#password-change):
+PowerAuth mobile SDK allows you to use both strings and special password objects at input, so it's up to you which way fits best for your purposes. For simplicity, this documentation uses strings for the passwords, but all code examples can be changed to utilize the `Password` object as well. For example, this is the modified code for the first step of [Password Change](#password-change):
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Change password from "oldPassword" to "newPassword".
 val oldPass = Password("oldPassword")
-val newPass = Password("newPassword")
-powerAuthSDK.changePassword(context, oldPass, newPass, object: IChangePasswordListener {
-    override fun onPasswordChangeSucceed() {
-        // Password was changed
+powerAuthSDK.beginPasswordChange(context, oldPass, object: IBeginPasswordChangeListener {
+    override fun onBeginPasswordChangeSucceed(changeData: PowerAuthPasswordChangeData) {
+        // success
     }
 
-    override fun onPasswordChangeFailed(t: Throwable) {
-        // Error occurred
+    override fun onBeginPasswordChangeFailed(t: Throwable) {
+        // Error occurred.
     }
 })
 ```
-```java
-// Change password from "oldPassword" to "newPassword".
-Password oldPass = new Password("oldPassword");
-Password newPass = new Password("newPassword")
-powerAuthSDK.changePassword(context, oldPass, newPass, new IChangePasswordListener() {
-    @Override
-    public void onPasswordChangeSucceed() {
-        // Password was changed
-    }
-
-    @Override
-    public void onPasswordChangeFailed(Throwable t) {
-        // Error occurred
-    }
-})
-```
-<!-- end -->
-
 
 ### Entering PIN
 
-If your application is using system numberic keyboard to enter user's PIN then you can migrate to `Password` object right now. We recommend you to do the following things:
+If your application is using a system numeric keyboard to enter the user's PIN then you can migrate to the `Password` object right now. We recommend you do the following things:
 
 - Implement your own PIN keyboard UI
 
-- Make sure that password object is allocated and referenced only in the PIN keyboard controller and is deallocated when user leaves the controller.
+- Make sure that the password object is allocated and referenced only in the PIN keyboard controller and is deallocated when the user leaves the controller.
 
-- Use `Password()` object that allows you to manipulate with the content of the PIN 
+- Use the `Password()` object that allows you to manipulate the content of the PIN 
 
 Here's the simple pseudo-controller example:
 
@@ -1384,16 +1158,18 @@ class EnterPinScene(val desiredPinLength: Int = 4) {
 
     fun onEnterScene() {
         // Allocate password when entering to the scene.
-        // Constructor with no parameters create mutable Password.
+        // Constructor with no parameters creates a mutable Password.
         pinInstance = Password()
     }
 
     fun onLeaveScene() {
-        // Dereference and destroy the password object, when user is leaving
+        // Dereference and destroy the password object, when the user is leaving
         // the scene to safely wipe the content out of the memory.
         //
         // Make sure that this is done only after PowerAuth SDK finishes all operations
         // started with this object at input.
+        // 
+        // Note that IllegalStateException is raised if you use Password object after its destroy.
         pinInstance?.destroy()
         pinInstance = null
     }
@@ -1403,9 +1179,9 @@ class EnterPinScene(val desiredPinLength: Int = 4) {
     }
 
     fun onPinButtonAction(pinCharacter: Char) {
-        // Mutable password works with unicode scalars, this is the example
-        // that works with an arbitrary character up to code-point 0xFFFF.
-        // To add an arbitrary unicode character, you need to convert it to code point first.
+        // Mutable password works with Unicode scalars, this is the example
+        // that works with an arbitrary character up to code point 0xFFFF.
+        // To add an arbitrary Unicode character, you need to convert it to code point first.
         // See https://stackoverflow.com/questions/9834964/char-to-unicode-more-than-uffff-in-java
         pin.addCharacter(pinCharacter.code)
         if (pin.length() == desiredPinLength) {
@@ -1428,47 +1204,34 @@ class EnterPinScene(val desiredPinLength: Int = 4) {
     }
 
     fun onContinueAction(pin: Password) {
-        // Do something with entered pin...
+        // Do something with the entered pin...
     }
 }
 ```
 
 ### Entering arbitrary password
 
-Unfortunately, there's no simple solution for this scenario. It's quite difficult to re-implement the whole keyboard on your own, so we recommend you to keep using the system keyboard. You can still create the `Password` object from already entered string:
+Unfortunately, there's no simple solution for this scenario. It's quite difficult to re-implement the whole keyboard on your own, so we recommend you keep using the system keyboard. You can still create the `Password` object from an already entered string:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val passwordString = "nbusr123"
 val password = Password(passwordString)
 ```
-```java
-final String passwordString = "nbusr123";
-final Password password = new Password(passwordString);
-```
-<!-- end -->
 
-### Create password from data
+### Create a password from the data
 
-In case that passphrase is somehow created externally in form of array of bytes, then you can instantiate it from the `Data` object directly:
+In case that passphrase is somehow created externally in the form of an array of bytes, then you can instantiate it from the `Data` object directly:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val passwordData = Base64.decode("bmJ1c3IxMjMK", Base64.NO_WRAP)
 val password = Password(passwordData)
 ```
-```java
-final byte[] passwordData = Base64.decode("bmJ1c3IxMjMK", Base64.NO_WRAP);
-final Password password = new Password(passwordData);
-```
-<!-- end -->
 
 
 ### Compare two passwords
 
-To compare two passwords, use `isEqual(to:)` method:
+To compare two passwords, use the `isEqual(to:)` method:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val password1 = Password("1234")
 val password2 = Password("Hello")
@@ -1480,18 +1243,6 @@ password3.addCharacter(0x34)
 print("${password1.isEqualToPassword(password2)}")  // false
 print("${password1 == password3}")                  // true
 ```
-```java
-final Password password1 = new Password("1234")
-final Password password2 = new Password("Hello")
-final Password password3 = new Password()
-password3.addCharacter(0x31)
-password3.addCharacter(0x32)
-password3.addCharacter(0x33)
-password3.addCharacter(0x34)
-Log.d("TAG", (password1.isEqualToPassword(password2)).toString())  // false
-Log.d("TAG", (password1.equals(password2)).toString())             // true
-```
-<!-- end -->
 
 ### Validate password complexity
 
@@ -1536,6 +1287,49 @@ You can use our [Passphrase meter](https://github.com/wultra/passphrase-meter) l
 <!-- end -->
 
 
+## Working with sensitive data
+
+The PowerAuth mobile SDK is using `SecureData` class for manage the cryptographically sensitive data, such as encryption keys. You can encounter this class in several public API functions, such as functions for [Secure Vault](#secure-vault). This chapter explains how to use the `SecureData` object properly.
+
+### Create instance of `SecureData`
+
+If you need to provide cryptographically sensitive key material to PowerAuth mobile SDK, then use the following code:
+
+```kotlin
+val yourKey = "nbuSR123nbuSR123".toByteArray()
+val secureData = SecureData.copy(yourKey)
+```
+
+The `secureData` object will keep copy of bytes. In case you also wants to erase also the content of the source array, then you can use an alternative construction:
+
+```kotlin
+val yourKey = "nbuSR123nbuSR123".toByteArray()
+val secureData = SecureData.copyAndClearSource(yourKey)
+```
+
+Finally, if you're sure that no other object retains reference to the byte array (for example, if it's returned as a result of encrypt or decrypt function), then you can use the following construction:
+
+```kotlin
+val yourKey = "nbuSR123nbuSR123".toByteArray()
+val secureData = SecureData.capture(yourKey)
+```
+
+### Using instance of `SecureData`
+
+To get reference to stored bytes, use the following code:
+
+```swift
+func processSecureData(secureData: SecureData) {
+    doSomethingWitBytes(secureData.sensitiveData)
+}
+```
+
+<!-- begin box warning -->
+Be aware that you should not keep the reference to provided byte array. If you need to keep the bytes longer, then keep the reference to `SecureData` instance, or make your own copy of bytes, returned in `sensitiveData` property.
+<!-- end -->
+
+
+
 ## Biometric Authentication Setup
 
 PowerAuth SDK for Android provides an abstraction on top of the base Biometric Authentication support. While the authentication / data signing itself is handled using the `PowerAuthAuthentication` object used in [regular request signing](#data-signing), other biometry-related processes require their own API.
@@ -1544,23 +1338,46 @@ PowerAuth SDK for Android provides an abstraction on top of the base Biometric A
 
 You have to check for Biometric Authentication on three levels:
 
-- **System Availability**: If biometric scanner is present on the system.
+- **System Availability**: If a biometric scanner is present on the system.
 - **Activation Availability**: If biometry factor data are available for given activation.
-- **Application Availability**: If user decided to use biometric authentication for given app. _(optional)_
+- **Application Availability**: If the user decides to use biometric authentication for the given app. _(optional)_
 
 PowerAuth SDK for Android provides code for the first and second of these checks.
 
-To check if you can use the biometric authentication, use our helper class:
+#### Overall status
 
-<!-- begin codetabs Kotlin Java -->
+To get information on whether biometric authentication is fully available, you can use the following code:
+
 ```kotlin
-// This method is equivalent to `BiometricManager.canAuthenticate() == BiometricManager.BIOMETRIC_SUCCESS`.
-// Use it to check if the biometric authentication can be used at the moment.
-val isBiometricAuthAvailable = BiometricAuthentication.isBiometricAuthenticationAvailable(context)
+if (powerAuthSDK.isAuthenticationWithBiometricsAvailable(context)) {
+    // Biometric authentication is available, you can construct PowerAuthAuthentication with biometry 
+} else {
+    // Fallback to PIN
+}
+```
 
-// For more fine-grained control about the actual biometric authentication status,
-// you may use the following code:
-when (BiometricAuthentication.canAuthenticate(context)) {
+The function returns `true` only if activation has biometry factor-related data available and the device has a biometric sensor available and biometrics are enrolled in the system.
+
+<!-- begin box info -->
+Note that this doesn't reflect state when the sensor is temporarily or permanently locked out. Such information is available only after you attempt to authenticate with biometrics.
+<!-- end -->
+
+To get more detailed information, use the following code:
+
+```kotlin
+val biometricStatus = powerAuthSDK.getBiometricStatus(context)
+```
+
+The next chapters explain in more detail the usage of the returned `PowerAuthBiometricStatus` object.
+
+#### System Availability
+
+To check, whether the biometrics is available at the system level, use the following code:
+
+```kotlin
+// Get biometric status
+val biometricStatus = powerAuthSDK.getBiometricStatus(context)
+when (biometricStatus.systemStatus) {
     BiometricStatus.OK ->
         print("Everything is OK")
     BiometricStatus.NOT_SUPPORTED ->
@@ -1574,15 +1391,17 @@ when (BiometricAuthentication.canAuthenticate(context)) {
 // If you want to adjust localized strings or icons presented to the user,
 // you can use the following code to determine the type of biometry available
 // on the system:
-when (BiometricAuthentication.getBiometryType(context)) {
+when (biometricStatus.biometryType) {
     BiometryType.NONE ->
         print("Biometry is not supported on the system.")
     BiometryType.GENERIC ->
-        // It's not possible to determine exact type of biometry.
-        // This happens on Android 10+ systems, when the device supports
+        // It's not possible to determine the exact type of biometry.
+        // This occurs on Android 10+ systems when the device supports
         // more than one type of biometric authentication. In this case,
-        // you should use generic terms, like "Authenticate with biometry"
-        // for your UI.
+        // you should use generic terms in your UI, such as "Authenticate with biometry".
+        // This issue can also arise on devices that support a new type of biometric
+        // sensor, or on older malfunctioning devices that fail to declare 
+        // support for FEATURE_FINGERPRINT.
         print("Biometry type is GENERIC")
     BiometryType.FINGERPRINT ->
         print("Fingerprint scanner is present on the device.")
@@ -1592,224 +1411,186 @@ when (BiometricAuthentication.getBiometryType(context)) {
         print("Iris scanner is present on the device.")
 }
 ```
-```java
-// This method is equivalent to `BiometricManager.canAuthenticate() == BiometricManager.BIOMETRIC_SUCCESS`.
-// Use it to check if the biometric authentication can be used at the moment.
-boolean isBiometricAuthAvailable = BiometricAuthentication.isBiometricAuthenticationAvailable(context);
 
-// For more fine-grained control about the actual biometric authentication status,
-// you may use the following code:
-switch (BiometricAuthentication.canAuthenticate(context)) {
-    case BiometricStatus.OK:
-        // everything's OK
-    case BiometricStatus.NOT_SUPPORTED:
-        // device's hardware doesn't support biometry
-    case BiometricStatus.NOT_ENROLLED:
-        // there's no biometry data enrolled on the device
-    case BiometricStatus.NOT_AVAILABLE:
-        // The biometric authentication is not available at this time.
-        // You may try to retry the operation later.
-}
+#### Activation Availability
 
-// If you want to adjust localized strings or icons presented to the user,
-// you can use the following code to determine the type of biometry available
-// on the system:
-switch (BiometricAuthentication.getBiometryType(context)) {
-    case BiometryType.NONE:
-        // Biometry is not supported on the system.
-    case BiometryType.GENERIC:
-        // It's not possible to determine exact type of biometry.
-        // This happens on Android 10+ systems, when the device supports
-        // more than one type of biometric authentication. In this case,
-        // you should use generic terms, like "Authenticate with biometry"
-        // for your UI.
-    case BiometryType.FINGERPRINT:
-        // Fingerprint scanner is present on the device.
-    case BiometryType.FACE:
-        // Face scanner is present on the device.
-    case BiometryType.IRIS:
-        // Iris scanner is present on the device.
-}
-```
-<!-- end -->
+To check whether activation is configured for authentication with biometrics, use the following code:
 
-To check if a given activation has biometry factor-related data available, use the following code:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Does activation have biometric factor-related data in place?
-val hasBiometryFactor = powerAuthSDK.hasBiometryFactor(context)
+// Get biometric status
+val biometricStatus = powerAuthSDK.getBiometricStatus(context)
+// Determine overall availability
+if (biometricStatus.isAuthenticationWithBiometricsAvailable) {
+    // Equal to call:
+    //   powerAuthSDK.isAuthenticationWithBiometricsAvailable(context)
+}
+// Determine whether local activation has biometric factor configured.
+if (biometricStatus.isBiometricFactorConfigured) {
+    // Equal to call
+    //   powerAuthSDK.hasBiometryFactor(context)
+}
 ```
-```java
-// Does activation have biometric factor-related data in place?
-boolean hasBiometryFactor = powerAuthSDK.hasBiometryFactor(context);
-```
-<!-- end -->
 
-The last check is fully under your control. By keeping the biometric settings flag, for example, a `BOOL` in `SharedPreferences`, you are able to show user an expected biometric authentication status (in a disabled state, though) even in the case biometric authentication is not enabled or when no fingers are enrolled on the device.
+#### Application Availability
+
+The last check is fully under your control. By keeping the biometric settings flag, for example, a `boolean` in `SharedPreferences`, you can show the user an expected biometric authentication status (in a disabled state, though) even in the case biometric authentication is not enabled or when no fingers are enrolled on the device.
+
 
 ### Enable Biometric Authentication
 
-In case an activation does not yet have biometry-related factor data, and you would like to enable biometric authentication support, the device must first retrieve the original private key from the secure vault for the purpose of key derivation. As a result, you have to use a successful 2FA with a password to enable biometric authentication support.
+In case an activation does not yet have biometry-related factor data, and you would like to enable biometric authentication support, use the following code:
 
-Use the following code to enable biometric authentication using biometric authentication:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Establish biometric data using provided password
-powerAuthSDK.addBiometryFactor(context, fragment, "Enable Biometric Authentication", "To enable biometric authentication, use the biometric sensor on your device.", "1234", object: IAddBiometryFactorListener {
+// Prepare biometric prompt.
+val biometricPrompt = PowerAuthBiometricPrompt.Builder(parentFragment)  // You can also use fragment activity in the constructor
+                        .setTitle("Enable Biometric Authentication")
+                        .setDescription("To enable biometric authentication, use the biometric sensor on your device.")
+                        .build()
+// Establish biometric data using the provided password
+powerAuthSDK.addBiometryFactor(context, "1234", biometricPrompt, object: IAddBiometryFactorListener {
     override fun onAddBiometryFactorSucceed() {
         // Everything went OK, biometric authentication is ready to be used
     }
 
-    override fun onAddBiometryFactorFailed(error: PowerAuthErrorException) {
-        // Error occurred, report it to user
+    override fun onAddBiometryFactorFailed(error: Throwable) {
+        // Error occurred, report it to the user.
+
+        // It's recommended to fetch activation's status to synchronize biometric factor
+        // configuration with the server.
     }
 })
 ```
-```java
-// Establish biometric data using provided password
-powerAuthSDK.addBiometryFactor(context, fragment, "Enable Biometric Authentication", "To enable biometric authentication, use the biometric sensor on your device.", "1234", new IAddBiometryFactorListener() {
-    @Override
-    public void onAddBiometryFactorSucceed() {
-        // Everything went OK, biometric authentication is ready to be used
-    }
 
-    @Override
-    public void onAddBiometryFactorFailed(@NonNull PowerAuthErrorException error) {
-        // Error occurred, report it to user
-    }
-});
-```
-<!-- end -->
+By default, PowerAuth SDK asks the user to authenticate with the biometric sensor also during the setup procedure (or during the [activation persist](#persisting-activation-data)). To alter this behavior, use the following code to change the `PowerAuthBiometricConfiguration` provided to the `PowerAuthSDK` instance:
 
-By default, PowerAuth SDK asks user to authenticate with the biometric sensor also during the setup procedure (or during the [activation commit](#committing-activation-data)). To alter this behavior, use the following code to change `PowerAuthKeychainConfiguration` provided to `PowerAuthSDK` instance:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-val keychainConfig = PowerAuthKeychainConfiguration.Builder()
+val biometricConfig = PowerAuthBiometricConfiguration.Builder()
     .authenticateOnBiometricKeySetup(false)
     .build()
 // Apply keychain configuration
 val powerAuthSDK = PowerAuthSDK.Builder(configuration)
-    .keychainConfiguration(keychainConfig)
+    .biometricConfiguration(biometricConfig)
     .build(getApplicationContext())
 ```
-```java
-PowerAuthKeychainConfiguration keychainConfig = new PowerAuthKeychainConfiguration.Builder()
-        .authenticateOnBiometricKeySetup(false)
-        .build();
-// Apply keychain configuration
-PowerAuthSDK powerAuthSDK = new PowerAuthSDK.Builder(configuration)
-        .keychainConfiguration(keychainConfig)
-        .build(getApplicationContext());
-```
-<!-- end -->
 
 <!-- begin box info -->
-Note that the RSA key-pair is internally generated for the configuration above. That may take more time on older devices than the default configuration. Your application should display a waiting indicator on its own, because SDK doesn't display an authentication dialog during the key-pair generation.
+Note that the RSA key pair is internally generated for the configuration above. That may take more time on older devices than the default configuration. Your application should display a waiting indicator on its own because SDK doesn't display an authentication dialog during the key-pair generation.
 <!-- end -->
+
+If the configuration above is applied, then you can use a "dummy" biometric prompt to simplify your biometric setup code:
+
+```kotlin
+// Prepare biometric prompt.
+val biometricPrompt = PowerAuthBiometricPrompt.noPromptForBiometricKeySetup(parentFragment)
+// Establish biometric data using the provided password
+powerAuthSDK.addBiometryFactor(context, "1234", biometricPrompt, object: IAddBiometryFactorListener {
+    // listener is the same as in previous example
+})
+```
 
 ### Disable Biometric Authentication
 
-You can remove biometry related factor data used by biometric authentication support by simply removing the related key locally, using this one-liner:
+To remove biometry-related factor data used by biometric authentication use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-powerAuthSDK.removeBiometryFactor(context)
+powerAuthSDK.removeBiometryFactor(context, object: IRemoveBiometryFactorListener {
+    override fun onRemoveBiometryFactorSucceed() {
+        // Everything went OK, biometric authentication is ready to be used
+    }
+
+    override fun onRemoveBiometryFactorFailed(error: Throwable) {
+        // Error occurred, report it to the user.
+
+        // It's recommended to fetch activation's status to synchronize biometric factor
+        // configuration with the server.
+    }
+})
 ```
-```java
-// Remove biometric data
-powerAuthSDK.removeBiometryFactor(context);
-```
-<!-- end -->
 
 ### Fetching the Biometry Factor-Related Key for Authentication
 
-In order to obtain an encrypted biometry factor-related key for the purpose of authentication, call the following code:
+To obtain an encrypted biometry factor-related key for authentication, call the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
+// Prepare biometric prompt data
+val biometricPrompt = PowerAuthBiometricPrompt.Builder(parentFragment)  // You can also use fragment activity in the constructor
+                        .setTitle("Sign in")
+                        .setDescription("Use the biometric sensor on your device to sign in.")
+                        .build()
 // Authenticate user with biometry and obtain encrypted biometry factor related key.
-powerAuthSDK.authenticateUsingBiometry(context, fragment, "Sign in", "Use the biometric sensor on your device to continue", object: IBiometricAuthenticationCallback {
+powerAuthSDK.authenticateUsingBiometrics(context, biometricPrompt, object: IAuthenticateWithBiometricsListener {
     override fun onBiometricDialogCancelled(userCancel: Boolean) {
-        // User cancelled the operation
+        // User or system canceled the operation
     }
 
-    override fun onBiometricDialogSuccess(biometricKeyData: BiometricKeyData) {
-        // User authenticated and biometry key was returned, now you can construct PowerAuthAuthentication object with proper signing capabilities.
-        val biometryFactorRelatedKey = biometricKeyData.derivedData
-        val twoFactorBiometry = PowerAuthAuthentication.possessionWithBiometry(biometryFactorRelatedKey)
+    override fun onBiometricDialogSuccess(authentication: PowerAuthAuthentication) {
+        // User authenticated to use the provided authentication object for other tasks.
     }
 
     override fun onBiometricDialogFailed(error: PowerAuthErrorException) {
         // Biometric authentication failed
+        val biometricErrorInfo = error.additionalInformation as? BiometricErrorInfo
+        if (biometricErrorInfo != null) {
+            if (biometricErrorInfo.isErrorPresentationRequired) {
+                // The application should present the reason for the biometric authentication failure to the user.
+                //
+                // If you don't disable the error dialog provided by the PowerAuth mobile SDK, then this may happen
+                // only when you try to use the biometric authentication while the biometric factor is not configured
+                // in the PowerAuthSDK instance.
+                val localizedMessage = biometricErrorInfo.getLocalizedErrorMessage(context, null)
+            }
+        } else {
+          // Other reasons for failure
+        }
     }
 })
 ```
-```java
-// Authenticate user with biometry and obtain encrypted biometry factor related key.
-powerAuthSDK.authenticateUsingBiometry(context, fragment, "Sign in", "Use the biometric sensor on your device to continue", new IBiometricAuthenticationCallback() {
-    @Override
-    public void onBiometricDialogCancelled(boolean userCancel) {
-        // User cancelled the operation
-    }
 
-    @Override
-    public void onBiometricDialogSuccess(BiometricKeyData biometricKeyData) {
-        // User authenticated and biometry key was returned, now you can construct PowerAuthAuthentication object with proper signing capabilities.
-        final byte[] biometryFactorRelatedKey = biometricKeyData.getDerivedData();
-        final PowerAuthAuthentication twoFactorBiometry = PowerAuthAuthentication.possessionWithBiometry(biometryFactorRelatedKey);
-    }
+<!-- begin box warning -->
+Disable all interactive UI elements while biometric authentication is in progress. After you call `authenticateUsingBiometrics()`, display a non-interactive “Verifying…” (or similar) progress state and do not accept user input until the SDK callback fires.
 
-    @Override
-    public void onBiometricDialogFailed(PowerAuthErrorException error) {
-        // Biometric authentication failed
-    }
-});
-```
+Why: Once the system biometric prompt is dismissed, your app regains focus before the PowerAuth SDK finishes its post-authentication cryptographic work on a background thread. During this brief window, your UI is visible but the authentication result is not ready. If you re-enable buttons or accept gestures too early, the user could trigger actions that assume authentication succeeded (or failed) prematurely. Wait for the callback, then update the UI based on the actual result.
 <!-- end -->
 
 <!-- begin box warning -->
-Note that if the biometric authentication fails with too many attempts in a row (e.g. biometry is temporarily or permanently locked out), then PowerAuth SDK will generate an invalid biometry factor related key and the success is reported. This is an intended behavior and as the result, it typically lead to unsuccessful authentication on the server and increased counter of failed attempts. The purpose of this is to limit the number of attempts for attacker to deceive the biometry sensor.
+Note that if the biometric authentication fails with too many attempts in a row (e.g. biometry is temporarily or permanently locked out), then PowerAuth SDK will generate an invalid biometry factor related key, and the success is reported. This is an intended behavior and as a result, it typically leads to unsuccessful authentication on the server and an increased counter of failed attempts. The purpose of this is to limit the number of attempts for attackers to deceive the biometry sensor.
 <!-- end -->
+
+### Facial Biometrics on Android
+
+Currently, facial authentication only works with several Android device models. This is because to implement facial authentication securely, the PowerAuth SDK needs to protect the biometry-related key in the Android Keystore with a biometric sensor. This type of secure storage is only supported on devices with the `BIOMETRIC_STRONG (class 3)` sensor type, as explained in the official documentation:
+
+- https://source.android.com/docs/security/features/biometric
+
+The Android source codes contain a list of devices with strong biometry support.
+
+- [biometric/biometric/src/main/res/values/devices.xml](https://cs.android.com/androidx/platform/frameworks/support/+/androidx-main:biometric/biometric/src/main/res/values/devices.xml;l=81)
 
 ### Biometry Factor-Related Key Lifetime
 
-By default, the biometry factor-related key is invalidated after the biometry enrolled in the system is changed. For example, if the user adds or removes the finger or enrolls with a new face, then the biometry factor-related key is no longer available for the signing operation. To change this behavior, you have to provide `PowerAuthKeychainConfiguration` object with `linkBiometricItemsToCurrentSet` parameter set to `false` and use that configuration for the `PowerAuthSDK` instance construction:
+By default, the biometry factor-related key is invalidated after the biometry enrolled in the system is changed. For example, if the user adds or removes the finger or enrolls with a new face, then the biometry factor-related key is no longer available for the signing operation. To change this behavior, you have to provide the `PowerAuthBiometricConfiguration` object with the `invalidateBiometricFactorAfterChange` parameter set to `false` and use that configuration for the `PowerAuthSDK` instance construction:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Use false for 'linkBiometricItemsToCurrentSet' parameter.
-val keychainConfig = PowerAuthKeychainConfiguration.Builder()
-    .linkBiometricItemsToCurrentSet(false)
+// Use false for the 'invalidateBiometricFactorAfterChange' parameter.
+val biometricConfig = PowerAuthBiometricConfiguration.Builder()
+    .invalidateBiometricFactorAfterChange(false)
     .build()
 // Apply keychain configuration
 val powerAuthSDK = PowerAuthSDK.Builder(configuration)
-    .keychainConfiguration(keychainConfig)
+    .biometricConfiguration(biometricConfig)
     .build(getApplicationContext())
 ```
-```java
-// Use false for 'linkBiometricItemsToCurrentSet' parameter.
-PowerAuthKeychainConfiguration keychainConfig = new PowerAuthKeychainConfiguration.Builder()
-            .linkBiometricItemsToCurrentSet(false)
-            .build();
-// Apply keychain configuration
-PowerAuthSDK powerAuthSDK = new PowerAuthSDK.Builder(configuration)
-        .keychainConfiguration(keychainConfig)
-        .build(getApplicationContext());
-```
-<!-- end -->
 
 Be aware that the configuration above is effective only for the new keys. So, if your application is already using the biometry factor-related key with a different configuration, then the configuration change doesn't change the existing key. You have to [disable](#disable-biometric-authentication) and [enable](#enable-biometric-authentication) biometry to apply the change.
 
 ### Biometric Authentication Details
 
-The `BiometricAuthentication` class is a high level interface that provides interfaces related to the biometric authentication for the SDK, or for the application purposes. The class hides all technical details, so it can be safely used also on the systems that doesn't provide biometric interfaces, or if the system has no biometric sensor available. The implementation under the hood uses `androidx.biometric.BiometricPrompt` and `androidx.biometric.BiometricManager` classes.
+The `BiometricAuthentication` class is a high-level interface that provides interfaces related to biometric authentication for the SDK or for application purposes. The class hides all technical details, so it can be safely used also on systems that don't provide biometric interfaces, or if the system has no biometric sensor available. The implementation under the hood uses `androidx.biometric.BiometricPrompt` and `androidx.biometric.BiometricManager` classes.
+
+#### Customize Biometric Dialog Resources 
 
 To customize the strings used in biometric authentication, you can use `BiometricDialogResources` in the following manner:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 // Prepare new strings, colors, etc...
 val newStrings = BiometricDialogResources.Strings(... constructor with string ids ...)
@@ -1823,45 +1604,65 @@ val resources = BiometricDialogResources.Builder()
 // Set resources to BiometricAuthentication
 BiometricAuthentication.setBiometricDialogResources(resources)
 ```
-```java
-// Prepare new strings, colors, etc...
-final BiometricDialogResources.Strings newStrings = new BiometricDialogResources.Strings(... constructor with string ids ...);
 
-// Build new resources object.
-// If you omit some custom resources object, then the Builder will replace that with resources bundled in SDK.
-final BiometricDialogResources resources = new BiometricDialogResources.Builder()
-                                            .setStrings(newStrings)
-                                            .build();
+#### Disable Error Dialog After Failed Biometry
 
-// Set resources to BiometricAuthentication
-BiometricAuthentication.setBiometricDialogResources(resources);
+If you prefer not to allow the PowerAuth mobile SDK to display its own error dialog, you can disable this feature globally. In this case, your application will need to handle all error situations through its own user interface. Use the following code to disable the error dialog:
+
+```kotlin
+BiometricAuthentication.setBiometricErrorDialogDisabled(true)
 ```
+
+When the error dialog is disabled, your application should inform the user of the reason for the failure. Handling this might be somewhat tricky because there are situations where the biometric authentication dialog is not displayed at all, and the failure is reported directly to the application. To address this, you can use the `BiometricErrorInfo` class, which is associated with the reported `PowerAuthErrorException`. The code snippet below outlines how to determine the situation:
+
+```kotlin
+// Prepare biometric prompt data
+val biometricPrompt = PowerAuthBiometricPrompt.Builder(parentFragment)  // You can also use fragment activity in the constructor
+                        .setTitle("Sign in")
+                        .setDescription("Use the biometric sensor on your device to sign in.")
+                        .build()
+// Authenticate user with biometry and obtain encrypted biometry factor related key.
+powerAuthSDK.authenticateUsingBiometrics(context, biometricPrompt, object: IAuthenticateWithBiometricsListener {
+    override fun onBiometricDialogCancelled(userCancel: Boolean) {
+        // User or system canceled the operation
+    }
+
+    override fun onBiometricDialogSuccess(authentication: PowerAuthAuthentication) {
+        // Success
+    }
+
+    override fun onBiometricDialogFailed(error: PowerAuthErrorException) {
+        val biometricErrorInfo = error.additionalInformation as? BiometricErrorInfo
+        if (biometricErrorInfo != null) {
+            if (biometricErrorInfo.isErrorPresentationRequired) {
+                // Application should present the reason of biometric authentication failure to the user
+                val localizedMessage = biometricErrorInfo.getLocalizedErrorMessage(context, null)
+            }
+        } else {
+            // Other reasons for failure
+        }
+    }
+})
+```
+
+<!-- begin box info -->
+Note that you still should [Customize Biometric Dialog Resources](#customize-biometric-dialog-resources) to get a proper localized error message.
 <!-- end -->
 
-On Android 10+ systems, it's possible to configure `BiometricPrompt` to ask for an additional confirmation after the user is successfully authenticated. The default behavior for PowerAuth Mobile SDK is that such confirmation is not required. To change this behavior, you have to provide `PowerAuthKeychainConfiguration` object with `confirmBiometricAuthentication` parameter set to `true` and use that configuration for the `PowerAuthSDK` instance construction:
+#### Biometric Authentication Confirmation
 
-<!-- begin codetabs Kotlin Java -->
+On Android 10+ systems, it's possible to configure `BiometricPrompt` to ask for an additional confirmation after the user is successfully authenticated. The default behavior for PowerAuth Mobile SDK is that such confirmation is not required. To change this behavior, you have to provide the `PowerAuthBiometricConfiguration` object with the `confirmBiometricAuthentication` parameter set to `true` and use that configuration for the `PowerAuthSDK` instance construction:
+
 ```kotlin
-// Use true for 'confirmBiometricAuthentication' parameter.
-val keychainConfig = PowerAuthKeychainConfiguration.Builder()
+// Use true for the 'confirmBiometricAuthentication' parameter.
+val biometricConfig = PowerAuthBiometricConfiguration.Builder()
     .confirmBiometricAuthentication(true)
     .build()
 // Apply keychain configuration
 val powerAuthSDK = PowerAuthSDK.Builder(configuration)
-    .keychainConfiguration(keychainConfig)
+    .biometricConfiguration(biometricConfig)
     .build(context)
 ```
-```java
-// Use true for 'confirmBiometricAuthentication' parameter.
-PowerAuthKeychainConfiguration keychainConfig = new PowerAuthKeychainConfiguration.Builder()
-        .confirmBiometricAuthentication(true)
-        .build();
-// Apply keychain configuration
-PowerAuthSDK powerAuthSDK = new PowerAuthSDK.Builder(configuration)
-        .keychainConfiguration(keychainConfig)
-        .build(getApplicationContext());
-```
-<!-- end -->
 
 ## Activation Removal
 
@@ -1869,29 +1670,23 @@ You can remove activation using several ways - the choice depends on the desired
 
 ### Simple Device-Only Removal
 
-You can clear activation data anytime from the `SharedPreferences`. The benefit of this method is that it does not require help from the server, and the user does not have to be logged in. The issue with this removal method is simple: The activation still remains active on the server-side. This, however, does not have to be an issue in your case.
+You can clear activation data anytime from the `SharedPreferences`. The benefit of this method is that it does not require help from the server, and the user does not have to be logged in. The issue with this removal method is simple: The activation still remains active on the server side. This, however, does not have to be an issue in your case.
 
 To remove only data related to PowerAuth SDK for Android, use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 powerAuthSDK.removeActivationLocal(context)
 ```
-```java
-powerAuthSDK.removeActivationLocal(context);
-```
-<!-- end -->
 
 ### Removal via Authenticated Session
 
-Suppose your server uses an authenticated session for keeping the users logged in. In that case, you can combine the previous method with calling your proprietary endpoint to remove activation for the currently logged-in user. The advantage of this method is that activation does not remain active on the server. The issue is that the user has to be logged in (the session must be active and must have activation ID stored) and that you have to publish your own method to handle this use case.
+Suppose your server uses an authenticated session to keep the users logged in. In that case, you can combine the previous method with calling your proprietary endpoint to remove activation for the currently logged-in user. The advantage of this method is that activation does not remain active on the server. The issue is that the user has to be logged in (the session must be active and must have an activation ID stored) and that you have to publish your own method to handle this use case.
 
 The code for this activation removal method is as follows:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 // Use custom call to proprietary server endpoint to remove activation.
-// User must be logged in at this moment, so that session can find
+//The user must be logged in at this moment, so that the session can find
 // associated activation ID
 this.httpClient.post(null, "/custom/activation/remove", object: ICustomListener {
     override fun onSucceed() {
@@ -1899,39 +1694,21 @@ this.httpClient.post(null, "/custom/activation/remove", object: ICustomListener 
     }
     
     override fun onFailed(t: Throwable) {
-        // Error occurred, report it to user
+        // Error occurred, report it to the user
     }
 })
 ```
-```java
-// Use custom call to proprietary server endpoint to remove activation.
-// User must be logged in at this moment, so that session can find
-// associated activation ID
-this.httpClient.post(null, "/custom/activation/remove", new ICustomListener() {
-    @Override
-    public void onSucceed() {
-        powerAuthSDK.removeActivationLocal(context);
-    }
-
-    @Override
-    public void onFailed(Throwable t) {
-        // Error occurred, report it to user
-    }
-});
-```
-<!-- end -->
 
 ### Removal via Signed Request
 
-PowerAuth Standard RESTful API has a default endpoint `/pa/v3/activation/remove` for an activation removal. This endpoint uses a signature verification for looking up the activation to be removed. The benefit of this method is that it is already present in both PowerAuth SDK for Android and PowerAuth Standard RESTful API - nothing has to be programmed. Also, the user does not have to be logged in to use it. However, the user has to authenticate using 2FA with either password or biometric authentication.
+PowerAuth Standard RESTful API has a dedicated endpoint for activation removal. This endpoint uses a authentication code verification for looking up the activation to be removed. The benefit of this method is that it is already present in both PowerAuth SDK for Android and PowerAuth Standard RESTful API - nothing has to be programmed. Also, the user does not have to be logged in to use it. However, the user has to authenticate using 2FA with either password or biometric authentication.
 
-Use the following code for an activation removal using signed request:
+Use the following code for an activation removal using a signed request:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
 
-// Remove activation using provided authentication object
+// Remove activation using the provided authentication object
 powerAuthSDK.removeActivationWithAuthentication(context, authentication, object: IActivationRemoveListener {
     override fun onActivationRemoveSucceed() {
         // OK, activation was removed
@@ -1942,130 +1719,184 @@ powerAuthSDK.removeActivationWithAuthentication(context, authentication, object:
     }
 })
 ```
-```java
-PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
 
-// Remove activation using provided authentication object
-powerAuthSDK.removeActivationWithAuthentication(context, authentication, new IActivationRemoveListener() {
-    @Override
-    public void onActivationRemoveSucceed() {
-        // OK, activation was removed
+<!-- begin box info -->
+Depending on server support and configuration, it's possible to remove the activation with 1FA authentication (e.g. using `PowerAuthAuthentication.possession()`).
+<!-- end -->
+
+### Rename via Signed Request
+
+PowerAuth Standard RESTful API also provides an activation rename endpoint. The SDK signs the request before encrypting it in the activation scope. The operation requires 2FA, so use possession with password or possession with biometry; possession-only authentication is rejected locally. The callback returns the server-confirmed activation name.
+
+```kotlin
+val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
+
+powerAuthSDK.renameActivationWithAuthentication(context, authentication, "John's Android", object: IActivationRenameListener {
+    override fun onActivationRenameSucceed(activationName: String) {
+        // Server-confirmed activation name
     }
 
-    @Override
-    public void onActivationRemoveFailed(Throwable t) {
+    override fun onActivationRenameFailed(t: Throwable) {
         // Report error to user
     }
 })
 ```
-<!-- end -->
 
 ## End-To-End Encryption
 
-Currently, PowerAuth SDK supports two basic modes of end-to-end encryption, based on the ECIES scheme:
+Currently, PowerAuth SDK supports two basic modes of end-to-end encryption:
 
 - In an "application" scope, the encryptor can be acquired and used during the whole lifetime of the application.
-- In an "activation" scope, the encryptor can be acquired only if `PowerAuthSDK` has a valid activation. The encryptor created for this mode is cryptographically bound to the parameters agreed during the activation process. You can combine this encryption with [PowerAuth Symmetric Multi-Factor Signature](#symmetric-multi-factor-signature) in "sign-then-encrypt" mode.
+- In an "activation" scope, the encryptor can be acquired only if `PowerAuthSDK` has a valid activation. The encryptor created for this mode is cryptographically bound to the parameters agreed during the activation process. You can combine this encryption with [PowerAuth Symmetric Multi-Factor Authentication Code](#symmetric-multi-factor-authentication-code) in "sign-then-encrypt" mode.
 
 
-For both scenarios, you need to acquire `EciesEncryptor` object, which will then provide interface for the request encryption and the response decryption. The object currently provides only low level encryption and decryption methods, so you need to implement your own JSON (de)serialization and request and response processing.
+For both scenarios, you need to acquire an `CoreEncryptor` object, which will then provide an interface for the request encryption and the response decryption. The object currently provides only low-level encryption and decryption methods, so you need to implement your own JSON (de)serialization and request and response processing.
 
 The following steps are typically required for a full E2EE request and response processing:
 
 1. Acquire the right encryptor from the `PowerAuthSDK` instance. For example:
    ```kotlin
    // Encryptor for "application" scope.
-   val encryptor = powerAuthSDK.eciesEncryptorForApplicationScope
+   val cancelable = powerAuthSDK.getEncryptorForApplicationScope(object : IGetEncryptorListener {
+        override fun onGetEncryptorSuccess(encryptor: CoreEncryptor) {
+            // Success
+        }
+
+        override fun onGetEncryptorFailed(t: Throwable) {
+            // Failure
+        }
+   });
    // ...or similar, for an "activation" scope.
-   val encryptor = powerAuthSDK.getEciesEncryptorForActivationScope(context)
+   val cancelable = powerAuthSDK.getEncryptorForActivationScope(context, object : IGetEncryptorListener {
+        override fun onGetEncryptorSuccess(encryptor: CoreEncryptor) {
+            // Success
+        }
+
+        override fun onGetEncryptorFailed(t: Throwable) {
+            // Failure
+        }
+   });
    ```
 
-2. Serialize your request payload, if needed, into a sequence of bytes. This step typically means that you need to serialize your model object into a JSON formatted sequence of bytes.
+1. Serialize your request payload, if needed, into a sequence of bytes. This step typically means that you need to serialize your model object into a JSON-formatted sequence of bytes.
 
-3. Encrypt your payload:
+1. Encrypt your payload:
    ```kotlin
-   val cryptogram = encryptor.encryptRequest(payloadData)
-   if (cryptogram == null) {
-       // cannot encrypt data
-   }  
+   val encryptedRequest = encryptor.encryptRequest(payloadData)
    ```
 
-4. Construct a JSON from provided cryptogram object. The dictionary with the following keys is expected:
-   - `ephemeralPublicKey` property fill with `cryptogram.getKeyBase64()`
-   - `encryptedData` property fill with `cryptogram.getBodyBase64()`
-   - `mac` property fill with `cryptogram.getMacBase64()`
-   - `nonce` property fill with `cryptogram.getNonceBase64()`
+1. Use request body in your networking library
+   ```kotlin
+   val requestBody = encryptedRequest.requestBody;
+   ```
 
-   So, the final request JSON should look like this:
-   ```json
-   {
-      "ephemeralPublicKey" : "BASE64-DATA-BLOB",
-      "encryptedData": "BASE64-DATA-BLOB",
-      "mac" : "BASE64-DATA-BLOB",
-      "nonce" : "BASE64-NONCE"
+1. Use the following HTTP headers (for signed requests, see note below) in your networking library:
+   ```kotlin
+   for (header in encryptedRequest.requestHeaders) {
+        val headerName = header.key;
+        val headerValue = header.value;
+        // User header in your networking library
    }
    ```
+   Note, that if an "activation" scoped encryptor is combined with PowerAuth Symmetric Multi-Factor Authentication Code, then this step is not required. The authentication header already contains all the information required for proper request decryption on the server.
 
-5. Add the following HTTP header (for signed requests, see note below):
-   ```kotlin
-   // Acquire a "metadata" object, which contains additional information for the request construction
-   val metadata = encryptor.metadata
-   val httpHeaderName = metadata.httpHeaderKey
-   val httpHeaderValue = metadata.httpHeaderValue
-   ```
-   Note, that if an "activation" scoped encryptor is combined with PowerAuth Symmetric Multi-Factor signature, then this step is not required. The signature's header already contains all information required for proper request decryption on the server.
-
-6. Fire your HTTP request and wait for a response
+1. Fire your HTTP request and wait for a response
    - In case that non-200 HTTP status code is received, then the error processing is identical to a standard RESTful response defined in our protocol. So, you can expect a JSON object with `"error"` and `"message"` properties in the response.
 
-7. Decrypt the response. The received JSON typically looks like this:
-   ```json
-   {
-      "encryptedData": "BASE64-DATA-BLOB",
-      "mac" : "BASE64-DATA-BLOB"
-   }
-   ```
-   
-   So, you need to create yet another "cryptogram" object, but with only two properties set:
+1. Decrypt the response
    ```kotlin
-   val responseCryptogram = EciesCryptogram(response.encryptedData, response.mac)
-   val responseData = encryptor.decryptResponse(responseCryptogram)
-   if (responseData == null) {
-       // failed to decrypt response data
-   }
+   val encryptedResponse = CoreEncryptedResponse(responseBody)
+   val responseData = encryptor.decryptResponse(encryptedResponse)
    ```
 
-8. And finally, you can process your received response.
+1. And finally, you can process your received response.
 
-As you can see, the E2EE is quite a non-trivial task. We recommend contacting us before using an application-specific E2EE. We can provide you more support on a per-scenario basis, especially if we first understand what you try to achieve with end-to-end encryption in your application.
+As you can see, the E2EE is quite a non-trivial task. We recommend contacting us before using an application-specific E2EE. We can provide you with more support on a per-scenario basis, especially if we first understand what you are trying to achieve with end-to-end encryption in your application.
 
 
 ## Secure Vault
 
-PowerAuth SDK for Android has basic support for an encrypted secure vault. At this moment, the only supported method allows your application to establish an encryption / decryption key with a given index. The index represents a "key number" - your identifier for a given key. Different business logic purposes should have encryption keys with a different index value.
+Secure Vault lets an application obtain **a base KDK** (Key Derivation Key) after a successful strong user authentication.
+The base KDK is not an encryption or MAC key and cannot be used directly — instead, the application can derive purpose-specific keys from it.
+This functionality is available only when the activation is already on **protocol version 4.0**.
 
-On a server side, all secure vault related work is concentrated in a `/pa/v3/vault/unlock` endpoint of PowerAuth Standard RESTful API. In order to receive data from this response, call must be authenticated with at least 2FA (using password or PIN).
+Use Secure Vault when you need a stable, high-entropy root for deriving multiple scoped keys (encryption, MAC, wrapping keys, etc.) tied to the user’s successful strong authentication, **without persisting** those child keys. The PowerAuth Mobile SDK guarantees that the base KDKs remain stable during the lifetime of an activation.
 
-<!-- begin box warning -->
-Secure vault mechanism does not support biometry by default. Use PIN code or password based authentication for unlocking the secure vault, or ask your server developers to enable biometry for vault unlock call by configuring PowerAuth Server instance.
-<!-- end -->
+### Key identifiers
 
-### Obtaining Encryption Key
+Two base KDKs are available, depending on the authentication factors used:
 
-In order to obtain an encryption key with a given index, use the following code:
+- `KNOWLEDGE` - available after successful authentication with possession + knowledge factors.
+- `KNOWLEDGE_OR_BIOMETRY` - available after any successful 2FA authentication. This key is at least as strong as `KNOWLEDGE` and can be used wherever a biometry-backed flow is acceptable.
 
-<!-- begin codetabs Kotlin Java -->
+### Obtaining the "KNOWLEDGE" base KDK
+
 ```kotlin
-// 2FA signature. It uses device related key and user PIN code.
+// 2FA authentication. It uses device-related key and user PIN code.
+val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
+val keyIdentifier = PowerAuthSecureVaultKeyId.KNOWLEDGE
+
+// Fetch the encryption key with the given index
+powerAuthSDK.fetchSecureVaultKey(context, authentication, keyIdentifier, object: IFetchSecureVaultKeyListener {
+    override fun onFetchSecureVaultKeySucceed(vaultKey: PowerAuthSecureVaultKey) {
+        // Derive a 32-byte key
+        val derivedKey = vaultKey.deriveKey(1000, 32)
+        val keyData = derivedKey.sensitiveData
+    }
+
+    override fun onFetchSecureVaultKeyFailed(throwable: Throwable) {
+        // Report error
+    }
+})
+```
+
+### Obtaining the "KNOWLEDGE_OR_BIOMETRY" base KDK
+
+```kotlin
+// 2FA authentication. It uses device-related key and user PIN code.
+// Alternatively, you can obtain authentication object with biometric authentication 
+// using authenticateUsingBiometrics() function.  
+val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
+val keyIdentifier = PowerAuthSecureVaultKeyId.KNOWLEDGE_OR_BIOMETRY
+
+// Fetch the encryption key with the given index
+powerAuthSDK.fetchSecureVaultKey(context, authentication, keyIdentifier, object: IFetchSecureVaultKeyListener {
+    override fun onFetchSecureVaultKeySucceed(vaultKey: PowerAuthSecureVaultKey) {
+        // Derive a 32-byte key
+        val derivedKey = vaultKey.deriveKey(1000, 32)
+        val keyData = derivedKey.sensitiveData
+    }
+
+    override fun onFetchSecureVaultKeyFailed(throwable: Throwable) {
+        // Report error
+    }
+})
+```
+
+### Security Recommendations
+
+- Do **not** store derived keys on the device. Always acquire the base KDK when needed and derive the keys for each specific purpose.
+- **Destroy** the base KDK as soon as possible.
+- Never reuse a derived key for multiple purposes (e.g., don’t use one key for both encryption and authentication).
+- When encrypting different data sets, **derive a new** key with a different index.
+- If your application uses multiple keys, maintain a **registry of derivation indices** to avoid accidental key reuse.
+
+### Obtaining Legacy Encryption Key
+
+If your activation is still using **PowerAuth protocol 3.3**, you can obtain the legacy encryption key as follows:
+
+```kotlin
+// 2FA authentication. It uses device-related key and user PIN code.
 val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
 
 // Select custom key index
 val index = 1000L
 
-// Fetch encryption key with given index
+// Fetch the encryption key with the given index
 powerAuthSDK.fetchEncryptionKey(context, authentication, index, object: IFetchEncryptionKeyListener {
-    override fun onFetchEncryptionKeySucceed(encryptedEncryptionKey: ByteArray) {
-        // ... use encryption key to encrypt or decrypt data
+    override fun onFetchEncryptionKeySucceed(encryptionKey: SecureData) {
+        // ... use the encryption key to encrypt or decrypt data
+        val keyBytes = encryptionKey.sensitiveData
     }
 
     override fun onFetchEncryptionKeyFailed(t: Throwable) {
@@ -2073,164 +1904,9 @@ powerAuthSDK.fetchEncryptionKey(context, authentication, index, object: IFetchEn
     }
 })
 ```
-```java
-// 2FA signature. It uses device related key and user PIN code.
-PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
 
-// Select custom key index
-long index = 1000L;
+This function is useful if you still have local data encrypted with a key generated by an older SDK version. It is recommended to decrypt the data with the old key and re-encrypt it using the new key, acquired via the `fetchSecureVaultKey()` function.
 
-// Fetch encryption key with given index
-powerAuthSDK.fetchEncryptionKey(context, authentication, index, new IFetchEncryptionKeyListener() {
-    @Override
-    public void onFetchEncryptionKeySucceed(byte[] encryptedEncryptionKey) {
-        // ... use encryption key to encrypt or decrypt data
-    }
-
-    @Override
-    public void onFetchEncryptionKeyFailed(Throwable t) {
-        // Report error
-    }
-})
-```
-<!-- end -->
-
-## Recovery Codes
-
-The recovery codes allow your users to recover their activation in case that mobile device is lost or stolen. Before you start, please read the [Activation Recovery](https://github.com/wultra/powerauth-crypto/blob/develop/docs/Activation-Recovery.md) document, available in our [powerauth-crypto](https://github.com/wultra/powerauth-crypto) repository.
-
-To recover an activation, the user has to re-type two separate values:
-
-1. Recovery Code itself, which is very similar to an activation code. So you can detect typing errors before you submit such code to the server.
-1. PUK, which is an additional numeric value and acts as a one-time password in the scheme.
-
-PowerAuth currently supports two basic types of recovery codes:
-
-1. Recovery Code bound to a previous PowerAuth activation.
-   - This type of code can be obtained only in an already activated application.
-   - This type of code has only one PUK available, so only one recovery operation is possible.
-   - The activation associated with the code is removed once the recovery operation succeeds.
-
-2. Recovery Code delivered via OOB channel, typically in the form of a securely printed postcard, delivered by the post service.
-   - This type of code has typically more than one PUK associated with the code, so it can be used multiple times.
-   - The user has to keep that postcard in safe and secure place, and mark already used PUKs.
-   - The code delivery must be confirmed by the user before the code can be used for a recovery operation.
-
-The feature is not automatically available. It must be enabled and configured on PowerAuth Server. If it's so, then your mobile application can use several methods related to this feature.
-
-### Getting Recovery Data
-
-If the recovery data was received during the activation process, then you can later display that information to the user. To check existence of recovery data and get that information, use the following code:
-
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-if (!powerAuthSDK.hasActivationRecoveryData()) {
-    // Recovery information is not available
-    return
-}
-
-// 2FA signature, uses device related key and user PIN code
-val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
-
-powerAuthSDK.getActivationRecoveryData(context, authentication, object: IGetRecoveryDataListener {
-    override fun onGetRecoveryDataSucceeded(recoveryData: RecoveryData) {
-        val recoveryCode = recoveryData.recoveryCode
-        val puk = recoveryData.puk
-        // Show values on the screen...
-    }
-
-    override fun onGetRecoveryDataFailed(t: Throwable) {
-        // Report error
-    }
-})
-```
-```java
-if (!powerAuthSDK.hasActivationRecoveryData()) {
-    // Recovery information is not available
-    return;
-}
-
-// 2FA signature, uses device related key and user PIN code
-PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
-
-powerAuthSDK.getActivationRecoveryData(context, authentication, new IGetRecoveryDataListener() {
-    @Override
-    public void onGetRecoveryDataSucceeded(RecoveryData recoveryData) {
-        final String recoveryCode = recoveryData.recoveryCode;
-        final String puk = recoveryData.puk;
-        // Show values on the screen...
-    }
-
-    @Override
-    public void onGetRecoveryDataFailed(Throwable t) {
-        // Report error
-    }
-});
-```
-<!-- end -->
-
-The obtained information is very sensitive, so you should be very careful how your application manipulates the received values:
-
-- You should never store `recoveryCode` or `puk` on the device.
-- You should never print the values to the debug log.
-- You should never send the values over the network.
-- You should never copy the values to the clipboard.
-- You should require PIN code every time to display the values on the screen.
-- You should warn user that taking screenshot of the values is not recommended.
-- Do not cache the values in RAM.
-
-You should inform the user that:
-
-- Making a screenshot when values are displayed on the screen is dangerous.
-- The user should write down that values on paper and keep it as much safe as possible for future use.
-
-
-### Confirm Recovery Postcard
-
-The recovery postcard can contain the recovery code and multiple PUK values on one printed card. Due to security reasons, this kind of recovery code cannot be used for the recovery operation before the user confirms its physical delivery. To confirm such recovery code, use the following code:
-
-<!-- begin codetabs Kotlin Java -->
-```kotlin
-// 2FA signature with possession factor is required
-val authentication = PowerAuthAuthentication.possessionWithPassword("1234")
-val recoveryCode = "VVVVV-VVVVV-VVVVV-VTFVA" // You can also use code scanned from QR
-powerAuthSDK.confirmRecoveryCode(context, authentication, recoveryCode, object: IConfirmRecoveryCodeListener {
-    override fun onRecoveryCodeConfirmed(alreadyConfirmed: Boolean) {
-        if (alreadyConfirmed) {
-            android.util.Log.d(TAG, "Recovery code has been already confirmed. This is not an error, just information.")
-        } else {
-            android.util.Log.d(TAG, "Recovery code has been successfully confirmed.")
-        }
-    }
-
-    override fun onRecoveryCodeConfirmFailed(t: Throwable) {
-        // Report error
-    }
-})
-```
-```java
-// 2FA signature with possession factor is required
-final PowerAuthAuthentication authentication = PowerAuthAuthentication.possessionWithPassword("1234");
-final String recoveryCode = "VVVVV-VVVVV-VVVVV-VTFVA" // You can also use code scanned from QR
-powerAuthSDK.confirmRecoveryCode(context, authentication, recoveryCode, new IConfirmRecoveryCodeListener{
-    @Override
-    public void onRecoveryCodeConfirmed(boolean alreadyConfirmed) {
-        if (alreadyConfirmed) {
-            android.util.Log.d(TAG, "Recovery code has been already confirmed. This is not an error, just information.");
-        } else {
-            android.util.Log.d(TAG, "Recovery code has been successfully confirmed.");
-        }
-    }
-
-    @Override
-    public void onRecoveryCodeConfirmFailed(Throwable t) {
-        // Report error
-    }
-});
-```
-<!-- end -->
-
-The `alreadyConfirmed` boolean indicates that the code was already confirmed in the past. You can choose a different "success" screen, describing that the user has already confirmed such code. Also, note that codes bound to the activations are already confirmed.
 
 ## Token-Based Authentication
 
@@ -2238,13 +1914,13 @@ The `alreadyConfirmed` boolean indicates that the code was already confirmed in 
 **WARNING:** Before you start using access tokens, please visit our [wiki page for powerauth-crypto](https://github.com/wultra/powerauth-crypto/blob/develop/docs/MAC-Token-Based-Authentication.md) for more information about this feature.
 <!-- end -->
 
-The tokens are simple, locally cached objects, producing timestamp-based authorization headers. Be aware that tokens are NOT a replacement for general PowerAuth signatures. They are helpful in situations when the signatures are too heavy or too complicated for implementation. Each token has the following properties:
+The tokens are simple, locally cached objects, producing timestamp-based authentication headers. Be aware that tokens are NOT a replacement for general PowerAuth Authentication Codes. They are helpful in situations when the codes are too heavy or too complicated for implementation. Each token has the following properties:
 
-- It needs PowerAuth signature for its creation (e.g., you need to provide `PowerAuthAuthentication` object)
+- It needs a PowerAuth Authentication Code for its creation (e.g., you need to provide a `PowerAuthAuthentication` object)
 - It has a unique identifier on the server. This identifier is not exposed to the public API, but you can reveal that value in the debugger.
-- It has symbolic name (e.g., "MyToken") defined by the application programmer to identify already created tokens.
-- It can generate timestamp-based authorization HTTP headers.
-- It can be used concurrently. Token's private data doesn't change in time.
+- It has a symbolic name (e.g., "MyToken") defined by the application programmer to identify already created tokens.
+- It can generate timestamp-based authentication HTTP headers.
+- It can be used concurrently. Token's private data doesn't change over time.
 - The token is associated with the `PowerAuthSDK` instance. So, you can use the same symbolic name in multiple SDK instances, and each created token will be unique.
 - Tokens are persisted in the `KeychainFactory` service and cached in the memory.
 - Once the parent `PowerAuthSDK` instance loses its activation, all its tokens are removed from the local database.
@@ -2253,9 +1929,8 @@ The tokens are simple, locally cached objects, producing timestamp-based authori
 
 To get an access token, you can use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// 1FA signature, uses device related key
+// 1FA authentication - uses device-related key
 val authentication = PowerAuthAuthentication.possession()
 val cancelableTask = powerAuthSDK.tokenStore.requestAccessToken(context, "MyToken", authentication, object: IGetTokenListener {
     override fun onGetTokenSucceeded(powerAuthToken: PowerAuthToken) {
@@ -2267,58 +1942,45 @@ val cancelableTask = powerAuthSDK.tokenStore.requestAccessToken(context, "MyToke
     }
 })
 ```
-```java
-// 1FA signature, uses device related key
-final PowerAuthAuthentication authentication = PowerAuthAuthentication.possession();
-final PowerAuthTokenStore tokenStore = powerAuthSDK.getTokenStore();
-final ICancelable task = tokenStore.requestAccessToken(context, "MyToken", authentication, new IGetTokenListener() {
-    @Override
-    public void onGetTokenSucceeded(@NonNull PowerAuthToken powerAuthToken) {
-        // the token has been successfully acquired
-    }
 
-    @Override
-    public void onGetTokenFailed(@NonNull Throwable throwable) {
-        // an error occurred
-    }
-});
-```
-<!-- end -->
+The request is performed synchronously or asynchronously depending on whether the token is locally cached on the device. You can test this situation by calling `tokenStore.hasLocalToken(context, "MyToken")`. If the operation is asynchronous, then `requestAccessToken()` returns a cancellable task.
 
-The request is performed synchronously or asynchronously depending on whether the token is locally cached on the device. You can test this situation by calling `tokenStore.hasLocalToken(context, "MyToken")`. If operation is asynchronous, then `requestAccessToken()` returns cancellable task.
+### Generating Authentication Header
+Use the following code to generate an authentication header:
 
-### Generating Authorization Header
-
-Once you have a `PowerAuthToken` object, use the following code to generate an authorization header:
-
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-val header: PowerAuthAuthorizationHttpHeader = token.generateHeader()
-if (header.isValid) {
-    // Header is valid, you can construct HTTP header...
+val task = tokenStore.generateAuthenticationHeader(context, "MyToken", object : IGenerateTokenHeaderListener {
+    override fun onGenerateTokenHeaderSucceeded(header: PowerAuthHttpHeader) {
+        val httpHeaderKey = header.key
+        val httpHeaderValue = header.value
+    }
+
+    override fun onGenerateTokenHeaderFailed(t: Throwable) {
+        // Failure
+    }
+})
+```
+
+Once you have a `PowerAuthToken` object, then you can use also a synchronous code to generate an authentication header:
+
+```kotlin
+try {
+    val header = token.generateTokenHeader()
     val httpHeaderKey = header.key
     val httpHeaderValue = header.value
-} else {
-    // handle error
+} catch (e: PowerAuthErrorException) {
+    // Handle error
 }
 ```
-```java
-PowerAuthAuthorizationHttpHeader header = token.generateHeader();
-if (header.isValid()) {
-    // Header is valid, you can construct HTTP header...
-    String httpHeaderKey = header.key;
-    String httpHeaderValue = header.value;
-} else {
-    // handle error
-}
-```
+
+<!-- begin box warning -->
+The synchronous example above is safe to use only if you're sure that the time is already [synchronized with the server](#synchronized-time).
 <!-- end -->
 
 ### Removing Token From the Server
 
 To remove the token from the server, you can use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 powerAuthSDK.tokenStore.removeAccessToken(context, "MyToken", object: IRemoveTokenListener {
     override fun onRemoveTokenSucceeded() {
@@ -2330,78 +1992,240 @@ powerAuthSDK.tokenStore.removeAccessToken(context, "MyToken", object: IRemoveTok
     }
 })
 ```
-```java
-powerAuthSDK.getTokenStore().removeAccessToken(context, "MyToken", new IRemoveTokenListener() {
-    @Override
-    public void onRemoveTokenSucceeded() {
-        android.util.Log.d(TAG, "Token has been removed");
-    }
-
-    @Override
-    public void onRemoveTokenFailed(@NonNull Throwable t) {
-        // handle HTTP error
-    }
-});
-```
-<!-- end -->
 
 ### Removing Token Locally
 
-To remove token locally, you can simply use the following code:
+To remove the token locally, you can simply use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 // Remove just one token
 powerAuthSDK.tokenStore.removeLocalToken(context, "MyToken")
 // Remove all local tokens
 powerAuthSDK.tokenStore.removeAllLocalTokens(context)
 ```
-```java
-// Remove just one token
-powerAuthSDK.getTokenStore().removeLocalToken(context, "MyToken");
-// Remove all local tokens
-powerAuthSDK.getTokenStore().removeAllLocalTokens(context);
-```
-<!-- end -->
 
 Note that by removing tokens locally, you will lose control of the tokens stored on the server.
 
+## Authenticated Protocol Upgrade
+
+The authenticated protocol upgrade procedure enables an existing activation to
+migrate to a newer algorithm for communication with the PowerAuth Server.
+Following conditions must be satisfied before the upgrade can proceed:
+
+- The PowerAuth Server version must be **2.0 or later**.
+- The PowerAuth SDK instance must be configured with support for at least
+`EC_P384` algorithm for communication with the PowerAuth Server.
+
+An application can check whether a protocol upgrade is available for the current
+activation by invoking:
+
+```kotlin
+val upgradeAvailable = powerAuthSDK.hasProtocolUpgradeAvailable()
+```
+
+Note that the availability information is derived from the activation status
+obtained from the PowerAuth Server. Consequently, an upgrade may become
+available after a successful activation status fetch. This method is not
+required to be called prior to starting the protocol upgrade.
+
+A protocol upgrade is an authenticated operation, and requires valid knowledge
+authentication factor (e.g. password or PIN). The `startProtocolUpgrade()`
+method is available in three variants, each designed for different biometric
+configuration.
+
+If the SDK configuration has the `authenticateOnBiometricKeySetup` enabled,
+biometric key cannot be upgraded automatically during the protocol upgrade
+process. If `authenticateOnBiometricKeySetup` is enabled in the SDK configuration
+and activation uses biometry factor, the biometry factor will be removed
+during the protocol upgrade process. In case of this setup, or when biometry
+factor is not used by the activation, use following call:
+
+```kotlin
+// Initiate the protocol upgrade process
+powerAuthSDK.startProtocolUpgrade(context, "password", object: IProtocolUpgradeListener {
+    override fun onProtocolUpgradeSucceed(result: ProtocolUpgradeResult) {
+        if (result.isActivationStatusFetchRequired()) {
+            // Activation status fetch is required to complete the protocol upgrade
+            if (result.isBiometryFactorRemoved()) {
+                // Biometry factor was removed during the protocol upgrade process.
+                // It is recommended to re-enable the biometry factor after a successful
+                // activation status fetch.
+            }
+        } else {
+            // Protocol upgrade is completed
+            if (result.isBiometryFactorRemoved()) {
+                // Biometry factor was removed during the protocol upgrade process.
+                // It is recommended to re-enable the biometry factor.
+            }
+        }
+    }
+
+    override fun onProtocolUpgradeFailed(t: Throwable) {
+        // Error occurred
+    }
+})
+```
+
+The method variant with `PowerAuthBiometricPrompt` allows the biometric key to
+be upgraded during the protocol upgrade, if the SDK configuration has the
+`authenticateOnBiometricKeySetup` disabled or external biometric key is not
+used. Following call is recommended in that case:
+
+```kotlin
+// Prepare biometric prompt.
+val biometricPrompt = PowerAuthBiometricPrompt.noPromptForBiometricKeySetup(parentFragment)
+// Initiate the protocol and biometry key upgrade process
+powerAuthSDK.startProtocolUpgrade(context, "password", biometricPrompt, object: IProtocolUpgradeListener {
+    override fun onProtocolUpgradeSucceed(result: ProtocolUpgradeResult) {
+        if (result.isActivationStatusFetchRequired()) {
+            // Activation status fetch is required to complete the protocol upgrade
+            if (result.isBiometryFactorRemoved()) {
+                // Biometry factor was removed during the protocol upgrade process.
+                // It is recommended to re-enable the biometry factor after a successful
+                // activation status fetch.
+            }
+        } else {
+            // Protocol upgrade is completed
+            if (result.isBiometryFactorRemoved()) {
+                // Biometry factor was removed during the protocol upgrade process.
+                // It is recommended to re-enable the biometry factor.
+            }
+        }
+    }
+
+    override fun onProtocolUpgradeFailed(t: Throwable) {
+        // Error occurred
+        // If SDK instance is configured with `authenticateOnBiometricKeySetup` enabled,
+        // the process fails with PowerAuthErrorCodes.WRONG_PARAMETER.
+    }
+})
+```
+
+The method variant with `SecureData` is intended for cases where the activation
+uses external biometric key. Provided `SecureData` will replace the biometric
+key during the protocol upgrade. If external biometric key is not used,
+this method variant has same behavior as the method variant without
+`PowerAuthBiometricPrompt` or `SecureData`.
+
+All three variants deliver a `ProtocolUpgradeResult` on success. The application
+must inspect the `activationStatusFetchRequired` field of the result object. If
+set to `true`, activation status fetch must be performed to complete the
+protocol upgrade. Only after successful activation status fetch is the protocol
+upgrade considered completed. If the `activationStatusFetchRequired` field of
+the result object is set to `false`, the protocol upgrade is considered
+completed without any further action and the result object also contains new
+`activationFingerprint`. The application should also inspect the
+`biometryFactorRemoved` field of the result object. If set to `true`, it
+indicates that the biometry factor was previously enabled but was removed during
+the protocol upgrade. In such case we recommend re-enabling the biometry factor
+using the standard workflow to [enable biometric authentication](#enable-biometric-authentication).
+
+If an error occurs during the protocol upgrade process, the PowerAuth SDK will
+revert to the previous activation state, and the upgrade can be safely retried
+later.
+
+Until the protocol upgrade is fully completed, the PowerAuth SDK restricts
+certain functionality, such as PowerAuth authentication code calculation. To
+verify whether the activation is still in the middle of an upgrade, call:
+
+```kotlin
+val upgradePending = powerAuthSDK.hasPendingProtocolUpgrade()
+```
+
+If this call returns true, the application must perform an activation status
+fetch to complete the upgrade.
+
 ## External Encryption Key
 
-The `PowerAuthSDK` allows you to specify an external encryption key (called EEK in our terminology) that can additionally protect the knowledge and the biometry factor keys. This feature is typically used to create a chain of activations where one instance of `PowerAuthSDK` is primary and unlocks access to all secondary activations.
+<!-- begin box warning -->
+Support for the External Encryption Key (EEK) was discontinued in PowerAuth Mobile SDK version 2.0.
+<!-- end -->
 
-The external encryption key has to be set before the activation is created, or can be added later. The internal state of `PowerAuthSDK` contains information that the factor keys are protected with EEK, so EEK must be known at the time of PowerAuth signature is calculated. You have three options on how to configure the key:
+In earlier SDK versions, `PowerAuthSDK` allowed you to specify an external encryption key (EEK) to provide an additional layer of protection for the knowledge and biometry factor keys. This mechanism was primarily used to create a chain of activations, where one primary `PowerAuthSDK` instance unlocked access to one or more secondary activations.
 
-1. Assign EEK into `PowerAuthConfiguration.Builder` at the time of `PowerAuthSDK` object creation.
-   - This is the most convenient way of using EEK, but the key must be known at the time of `PowerAuthSDK` instantiation.
-   - Once the `PowerAuthSDK` instance creates a new activation, then the factor keys will be automatically protected with EEK.
-   
-2. Use `PowerAuthSDK.setExternalEncryptionKey()` to set EEK after the `PowerAuthSDK` instance is created.
-   - This is useful in case EEK is not known during the `PowerAuthSDK` instance creation.
-   - You can set the key in any `PowerAuthSDK` state, but be aware that the method will fail in case the instance has a valid activation that doesn't use EEK.
-   - It's safe to set the same EEK multiple times.
+If the activation in your application is still using EEK, please use the following code at your application’s startup to remove it:
 
-3. Use `PowerAuthSDK.addExternalEncryptionKey()` to add EEK and protect the factor keys in case that `PowerAuthSDK` has already a valid activation.
-   - This method is useful in case `PowerAuthSDK` already has a valid activation, but it doesn't use EEK yet.
-   - The method automatically adds EEK into the internal configuration structure, but be aware, that all future `PowerAuthSDK` usages (e.g. after app restart) require to set EEK by configuration, or by the `setExternalEncryptionKey()` method.
+```kotlin
+if (powerAuthSDK.hasExternalEncryptionKey()) {
+    val eek = SecureData(eekBytes)
+    powerAuthSDK.removeExternalEncryptionKey(eek)
+}
+```
 
-You can remove EEK from an existing activation if the key is no longer required. To do this, use `PowerAuthSDK.removeExternalEncryptionKey()` method. Be aware, that EEK must be set by configuration, or by the `setExternalEncryptionKey()` method before you call the remove method. You can also use the `PowerAuthSDK.hasExternalEncryptionKey()` function to test whether the key is already set and in use.
+## Synchronized Time
 
+The PowerAuth mobile SDK internally uses time synchronized with the PowerAuth Server for its cryptographic functions, such as [End-To-End Encryption](#end-to-end-encryption) or [Token-Based Authentication](#token-based-authentication). The synchronized time can also be beneficial for your application. For example, if you want to display a time-sensitive message or countdown to your users, you can take advantage of this service.
+
+Use the following code to get the service responsible for the time synchronization: 
+
+```kotlin
+val timeService = powerAuthSDK.timeSynchronizationService
+```
+
+### Automatic Time Synchronization
+
+The time is synchronized automatically in the following situations:
+
+- After an activation is created
+- After getting an activation status
+- After receiving any response encrypted with our End-To-End Encryption scheme
+
+The time synchronization is reset automatically once your application transitions from the background to the foreground.
+
+### Manually Synchronize Time
+
+Use the following code to synchronize the time manually:
+
+```kotlin
+val task = timeService.synchronizeTime(object: ITimeSynchronizationListener {
+    override fun onTimeSynchronizationSucceeded() {
+        // Synchronization succeeded
+    }
+
+    override fun onTimeSynchronizationFailed(t: Throwable) {
+        // Synchronization failed
+    }
+})
+```
+
+### Get Synchronized Time
+
+To get the synchronized time, use the following code:
+
+```kotlin
+if (timeService.isTimeSynchronized) {
+    // get synchronized timestamp in milliseconds, since 1.1.1970
+    val timestamp = timeService.currentTime
+} else {
+    // Time is not synchronized yet. If you call currentTime then 
+    // the returned timestamp is similar to System.currentTimeMillis()
+    val timestamp = timeService.currentTime
+}
+```
+
+The time service provides additional information about time, such as how precisely the time is synchronized with the server:
+
+```kotlin
+if (timeService.isTimeSynchronized) {
+    val precision = timeService.localTimeAdjustmentPrecision
+    println("Time is now synchronized with precision ${precision}")
+}
+```
+
+The precision value represents a maximum absolute deviation of synchronized time against the actual time on the server. For example, a value `500` means that the time provided by the `currentTime` method may be 0.5 seconds ahead or behind the actual time on the server. If the precision is not sufficient for your purpose, for example, if you need to display a real-time countdown in your application, then try to synchronize the time manually. The precision basically depends on how quickly is the synchronization response received and processed from the server. A faster response results in higher precision.
 
 ## Common SDK Tasks
 
 ### Error Handling
 
-The PowerAuth SDK is using the following types of exceptions:
+The PowerAuth SDK uses the following types of exceptions:
 
-- `PowerAuthMissingConfigException` - is typically thrown immediately when `PowerAuthSDK` instance is initialized with an invalid configuration.
 - `FailedApiException` - is typically returned to callbacks when an asynchronous HTTP request ends on error.
-- `ErrorResponseApiException` - is typically returned to callbacks when an asynchronous HTTP request ends on error and the error model object is present in the response.
-- `PowerAuthErrorException` - typically covers all other erroneous situations. You can investigate a detailed reason of failure by getting the integer, from set of `PowerAuthErrorCodes` constants.
+- `ErrorResponseApiException` - is typically returned to callbacks when an asynchronous HTTP request ends on an error and the error model object is present in the response.
+- `PowerAuthErrorException` - typically covers all other erroneous situations. You can investigate a detailed reason for failure by getting the integer, from the set of `PowerAuthErrorCodes` constants.
 
-Here's an example for a typical error handling procedure:
+Here's an example of a typical error-handling procedure:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val t: Throwable // reported in asynchronous callback
 when (t) {
@@ -2417,13 +2241,29 @@ when (t) {
             PowerAuthErrorCodes.BIOMETRY_CANCEL -> Log.d(TAG, "Error code for Biometry action cancel error")
             PowerAuthErrorCodes.BIOMETRY_NOT_SUPPORTED -> Log.d(TAG, "The device or operating system doesn't support biometric authentication.")
             PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE -> Log.d(TAG, "The biometric authentication is temporarily unavailable.")
-            PowerAuthErrorCodes.BIOMETRY_NOT_RECOGNIZED -> Log.d(TAG, "The biometric authentication did not recognize the biometric image (fingerprint, face, etc...)")
+            PowerAuthErrorCodes.BIOMETRY_NOT_RECOGNIZED -> Log.d(TAG, "The biometric authentication did not recognize the biometric image") // Reported only during biometric authentication setup
+            PowerAuthErrorCodes.BIOMETRY_NOT_ENROLLED -> Log.d(TAG, "The biometric authentication failed because there's no biometry enrolled")
             PowerAuthErrorCodes.BIOMETRY_LOCKOUT -> Log.d(TAG, "The biometric authentication is locked out due to too many failed attempts.")
             PowerAuthErrorCodes.OPERATION_CANCELED -> Log.d(TAG, "Error code for cancelled operations")
             PowerAuthErrorCodes.ENCRYPTION_ERROR -> Log.d(TAG, "Error code for errors related to end-to-end encryption")
-            PowerAuthErrorCodes.INVALID_TOKEN -> Log.d(TAG, "Error code for errors related to token based auth.")
+            PowerAuthErrorCodes.INVALID_TOKEN -> Log.d(TAG, "Error code for errors related to token-based auth.")
+            PowerAuthErrorCodes.INSUFFICIENT_KEYCHAIN_PROTECTION -> Log.d(TAG, "Device doesn't support requested keychain protection.")
             PowerAuthErrorCodes.PROTOCOL_UPGRADE -> Log.d(TAG, "Error code for error that occurs when protocol upgrade fails at unrecoverable error.")
             PowerAuthErrorCodes.PENDING_PROTOCOL_UPGRADE -> Log.d(TAG, "The operation is temporarily unavailable, due to pending protocol upgrade.")
+            PowerAuthErrorCodes.TIME_SYNCHRONIZATION -> Log.d(TAG, "Failed to synchronize time with the server.")
+            PowerAuthErrorCodes.WRONG_SIGNATURE -> Log.d(TAG, "Digital or JWS signature is not valid.")
+            PowerAuthErrorCodes.UPGRADE_SDK -> Log.d(TAG, "Upgrade PowerAuth Mobile SDK in your application.")
+            PowerAuthErrorCodes.OTHER -> Log.d(TAG, "Unspecified error.")
+        }
+        // Process additional information
+        val additionalInfo = error.additionalInformation
+        when (additionalInfo) {
+            is BiometricErrorInfo -> {
+                if (additionalInfo.isErrorPresentationRequired) {
+                    //The application should display an error dialog after failed biometric authentication. This is relevant only
+                    // if you disabled the biometric error dialog provided by PowerAuth mobile SDK.
+                }
+            }
         }
     }
     is ErrorResponseApiException -> {
@@ -2441,97 +2281,34 @@ when (t) {
     }
 }
 ```
-```java
-Throwable t; // reported in asynchronous callback
-if (t instanceof PowerAuthErrorException) {
-    switch (((PowerAuthErrorException) t).getPowerAuthErrorCode()) {
-        case PowerAuthErrorCodes.NETWORK_ERROR:
-            android.util.Log.d(TAG, "Error code for error with network connectivity or download"); break;
-        case PowerAuthErrorCodes.SIGNATURE_ERROR:
-            android.util.Log.d(TAG,"Error code for error in signature calculation"); break;
-        case PowerAuthErrorCodes.INVALID_ACTIVATION_STATE:
-            android.util.Log.d(TAG,"Error code for error that occurs when activation state is invalid"); break;
-        case PowerAuthErrorCodes.INVALID_ACTIVATION_DATA:
-            android.util.Log.d(TAG,"Error code for error that occurs when activation data is invalid"); break;
-        case PowerAuthErrorCodes.MISSING_ACTIVATION:
-            android.util.Log.d(TAG,"Error code for error that occurs when activation is required but missing"); break;
-        case PowerAuthErrorCodes.PENDING_ACTIVATION:
-            android.util.Log.d(TAG,"Error code for error that occurs when pending activation is present and work with completed activation is required"); break;
-        case PowerAuthErrorCodes.INVALID_ACTIVATION_CODE:
-            android.util.Log.d(TAG,"Error code for error that occurs when invalid activation code is provided."); break;
-        case PowerAuthErrorCodes.BIOMETRY_CANCEL:
-            android.util.Log.d(TAG,"Error code for Biometry action cancel error"); break;
-        case PowerAuthErrorCodes.BIOMETRY_NOT_SUPPORTED:
-            android.util.Log.d(TAG,"The device or operating system doesn't support biometric authentication."); break;
-        case PowerAuthErrorCodes.BIOMETRY_NOT_AVAILABLE:
-            android.util.Log.d(TAG,"The biometric authentication is temporarily unavailable."); break;
-        case PowerAuthErrorCodes.BIOMETRY_NOT_RECOGNIZED:
-            android.util.Log.d(TAG,"The biometric authentication did not recognize the biometric image (fingerprint, face, etc...)"); break;
-        case PowerAuthErrorCodes.BIOMETRY_LOCKOUT:
-            android.util.Log.d(TAG,"The biometric authentication is locked out due to too many failed attempts."); break;
-        case PowerAuthErrorCodes.OPERATION_CANCELED:
-            android.util.Log.d(TAG,"Error code for cancelled operations"); break;
-        case PowerAuthErrorCodes.ENCRYPTION_ERROR:
-            android.util.Log.d(TAG,"Error code for errors related to end-to-end encryption"); break;
-        case PowerAuthErrorCodes.INVALID_TOKEN:
-            android.util.Log.d(TAG,"Error code for errors related to token based auth."); break;
-        case PowerAuthErrorCodes.PROTOCOL_UPGRADE:
-            android.util.Log.d(TAG,"Error code for error that occurs when protocol upgrade fails at unrecoverable error."); break;
-        case PowerAuthErrorCodes.PENDING_PROTOCOL_UPGRADE:
-            android.util.Log.d(TAG,"The operation is temporarily unavailable, due to pending protocol upgrade."); break;
-    }
-} else if (t instanceof ErrorResponseApiException) {
-    ErrorResponseApiException exception = (ErrorResponseApiException) t;
-    Error errorResponse = exception.getErrorResponse();
-    int httpResponseStatusCode = exception.getResponseCode();
-    // Additional, optional objects assigned to the exception.
-    JsonObject jsonResponseObject = exception.getResponseJson();
-    String responseBodyString = exception.getResponseBody();
-} else if (t instanceof FailedApiException) {
-    FailedApiException exception = (FailedApiException) t;
-    int httpStatusCode = exception.getResponseCode();
-    // Additional, optional objects assigned to the exception.
-    JsonObject jsonResponseObject = exception.getResponseJson();
-    String responseBodyString = exception.getResponseBody();
-}
-```
-<!-- end -->
 
-Note that you typically don't need to handle all error codes reported in the `PowerAuthErrorException`, or report all that situations to the user. Most of the codes are informational and help the developers properly integrate SDK into the application. A good example is `INVALID_ACTIVATION_STATE`, which typically means that your application's logic is broken and you're using PowerAuthSDK in an unexpected way.
+Note that you typically don't need to handle all error codes reported in the `PowerAuthErrorException`, or report all those situations to the user. Most of the codes are informational and help the developers properly integrate SDK into the application. A good example is `INVALID_ACTIVATION_STATE`, which typically means that your application's logic is broken and you're using PowerAuthSDK in an unexpected way.
 
 Here's the list of important error codes, which the application should properly handle:
 
 - `BIOMETRY_CANCEL` is reported when the user cancels the biometric authentication dialog
-- `PROTOCOL_UPGRADE` is reported when SDK failed to upgrade itself to a newer protocol version. The code may be reported from `PowerAuthSDK.fetchActivationStatusWithCallback()`. This is an unrecoverable error resulting in the broken activation on the device, so the best situation is to inform user about the situation and remove the activation locally.
-- `PENDING_PROTOCOL_UPGRADE` is reported when the requested SDK operation cannot be completed due to a pending PowerAuth protocol upgrade. You can retry the operation later. The code is typically reported in the situations when SDK is performing protocol upgrade on the background (as a part of activation status fetch), and the application want's to calculate PowerAuth signature in parallel operation. Such kind of concurrency is forbidden since SDK version `1.0.0`
+- `PROTOCOL_UPGRADE` is reported when SDK fails to upgrade itself to a newer protocol version. The code may be reported from `PowerAuthSDK.fetchActivationStatusWithCallback()`. This is an unrecoverable error resulting in the broken activation on the device, so the best situation is to inform the user about the situation and remove the activation locally.
+- `PENDING_PROTOCOL_UPGRADE` is reported when the requested SDK operation cannot be completed due to a pending PowerAuth protocol upgrade. You can retry the operation later. The code is typically reported in situations when SDK is performing protocol upgrade in the background (as a part of activation status fetch), and the application wants to calculate the PowerAuth authentication code in parallel operation. Such kind of concurrency is forbidden since SDK version `1.0.0`
 
 
 ### Working with Invalid SSL Certificates
 
 Sometimes, you may need to develop or test your application against a service that runs over HTTPS protocol with an invalid (self-signed) SSL certificate. By default, the HTTP client used in PowerAuth SDK communication validates the certificate. To disable the certificate validation, use a `PowerAuthSDK` initializer with a custom client configuration to initialize your PowerAuth SDK instance, like so:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
-// Set `HttpClientSslNoValidationStrategy as the defauld client SSL certificate validation strategy
+// Set `HttpClientSslNoValidationStrategy as the default client SSL certificate validation strategy
 val clientConfiguration = PowerAuthClientConfiguration.Builder()
     .clientValidationStrategy(HttpClientSslNoValidationStrategy())
     .build()
 ```
-```java
-// Set `HttpClientSslNoValidationStrategy as the defauld client SSL certificate validation strategy
-final PowerAuthClientConfiguration clientConfiguration = new PowerAuthClientConfiguration.Builder()
-                .clientValidationStrategy(new HttpClientSslNoValidationStrategy())
-                .build();
-```
-<!-- end -->
 
-Be aware, that using this option will lead to use an unsafe implementation of `HostnameVerifier` and `X509TrustManager` SSL client validation. This is useful for debug/testing purposes only, e.g. when untrusted self-signed SSL certificate is used on server side.
+Be aware, that using this option will lead to the use of an unsafe implementation of `HostnameVerifier` and `X509TrustManager` SSL client validation. This is useful for debug/testing purposes only, e.g. when an untrusted self-signed SSL certificate is used on the server side.
 
-It's strictly recommended to use this option only in debug flavours of your application. Deploying to production may cause "Security alert" in Google Developer Console. Please see [this](https://support.google.com/faqs/answer/7188426) and [this](https://support.google.com/faqs/answer/6346016) Google Help Center articles for more details. Beginning 1 March 2017, Google Play will block publishing of any new apps or updates that use such unsafe implementation of `HostnameVerifier`.
+It's strictly recommended to use this option only in debug flavors of your application. Deploying to production may cause a "Security alert" in the Google Developer Console. Please see [this](https://support.google.com/faqs/answer/7188426) and [this](https://support.google.com/faqs/answer/6346016) Google Help Center articles for more details. Beginning 1 March 2017, Google Play will block the publishing of any new apps or updates that use such unsafe implementation of `HostnameVerifier`.
 
-How to solve this problem for debug/production flavours in the Gradle build script:
+How to solve this problem for debug/production flavors in the Gradle build script:
 
-1. Define boolean type `buildConfigField` in the flavour configuration.
+1. Define the boolean type `buildConfigField` in the flavor configuration.
    ```gradle
    productFlavors {
       production {
@@ -2543,21 +2320,13 @@ How to solve this problem for debug/production flavours in the Gradle build scri
    }
    ```
 
-2. In code use this conditional initialization for `PowerAuthClientConfiguration.Builder` builder.
-   <!-- begin codetabs Kotlin Java -->
+2. In code use this conditional initialization for the `PowerAuthClientConfiguration.Builder` builder.
    ```kotlin
    val clientBuilder = PowerAuthClientConfiguration.Builder()
    if (BuildConfig.TRUST_ALL_SSL_HOSTS) {
        clientBuilder.clientValidationStrategy(HttpClientSslNoValidationStrategy())
    }
    ```
-   ```java
-   PowerAuthClientConfiguration.Builder clientBuilder = new PowerAuthClientConfiguration.Builder();
-   if (BuildConfig.TRUST_ALL_SSL_HOSTS) {
-       clientBuilder.clientValidationStrategy(new HttpClientSslNoValidationStrategy());
-   }
-   ```
-   <!-- end -->
 
 3. Set `minifyEnabled` to true for release buildType to enable code shrinking with ProGuard.
 
@@ -2566,44 +2335,137 @@ How to solve this problem for debug/production flavours in the Gradle build scri
 
 The debug log is by default turned off. To turn it on, use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 PowerAuthLog.setEnabled(true)
 ```
-```java
-PowerAuthLog.setEnabled(true);
-```
-<!-- end -->
 
-To turn-on even more detailed log, use the following code:
+To turn on an even more detailed log, use the following code:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 PowerAuthLog.setVerbose(true)
 ```
-```java
-PowerAuthLog.setVerbose(true);
-```
-<!-- end -->
 
-Note that it's highly recommended to turn-on this feature only for `DEBUG` build of your application. For example:
+Note that it's highly recommended to turn on this feature only for the `DEBUG` build of your application. For example:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 if (BuildConfig.DEBUG) {
     PowerAuthLog.setEnabled(true)
 }
 ```
-```java
-if (BuildConfig.DEBUG) {
-    PowerAuthLog.setEnabled(true);
+
+You can intercept the log and log it into your own report system, you can do so with `PowerAuthLogListener`.
+
+```kotlin
+PowerAuthLog.logListener = object : PowerAuthLogListener {
+    override fun powerAuthDebugLog(message: String) {
+        // Process debug log...
+        // Note that the debug log is only reported when 
+        // PowerAuthLog.setEnabled(true) is set.
+        // We highly discourage using debug logs in production builds.
+    }
+
+    override fun powerAuthWarningLog(message: String) {
+        // Process warning log...
+    }
+
+    override fun powerAuthErrorLog(message: String) {
+        // Process error log...
+    }
 }
 ```
-<!-- end -->
 
 ## Additional Features
 
 PowerAuth SDK for Android contains multiple additional features that are useful for mobile apps.
+
+### Obtaining User's Claims
+
+If supported by the server, the PowerAuth mobile SDK can provide additional information asserted about a person associated with an activation. This information can be obtained either during the activation process or at a later time.
+
+Here is an example of how to process user information during activation:
+
+```kotlin
+powerAuthSDK.createActivation(activation, object : ICreateActivationListener {
+    override fun onActivationCreateSucceed(result: CreateActivationResult) {
+        if (result.userInfo != null) {
+            // User information received.
+            // At this moment, the object is also available at
+            // powerAuthSDK.lastFetchedUserInfo
+        }
+    }
+
+    override fun onActivationCreateFailed(t: Throwable) {
+        // Error handling
+    }
+})
+```
+
+To fetch the user information at a later time, use the following code:
+
+```kotlin
+val userInfo = powerAuthSDK.lastFetchedUserInfo
+if (userInfo != null) {
+    // User information is already available
+} else {
+    powerAuthSDK.fetchUserInfo(context, object : IUserInfoListener {
+        override fun onUserInfoSucceed(userInfo: UserInfo) {
+            // User information received
+        }
+
+        override fun onUserInfoFailed(t: Throwable) {
+            // Error handling
+        }
+    })
+}
+```
+
+The obtained `UserInfo` object contains the following properties:
+
+| Property                | Type     | Description |
+|-------------------------|----------|-------------|
+| `subject`               | `String` | The user's identifier |
+| `name`                  | `String` | The full name of the user |
+| `givenName`             | `String` | The given or first name of the user |
+| `familyName`            | `String` | The surname(s) or last name(s) of the user |
+| `middleName`            | `String` | The middle name of the user |
+| `nickname`              | `String` | The casual name of the user |
+| `preferredUsername`     | `String` | The username by which the user wants to be referred to at the application |
+| `profileUrl`            | `String` | The URL of the profile page for the user |
+| `pictureUrl`            | `String` | The URL of the profile picture for the user |
+| `websiteUrl`            | `String` | The URL of the user's web page or blog |
+| `email`                 | `String` | The user's preferred email address |
+| `isEmailVerified`       | `Boolean`| True if the user's email address has been verified, else false<sup>1</sup> |
+| `phoneNumber`           | `String` | The user's preferred telephone number<sup>2</sup> |
+| `isPhoneNumberVerified` | `Boolean`| True if the user's telephone number has been verified, else false<sup>1</sup> |
+| `gender`                | `String` | The user's gender |
+| `birthdate`             | `Date`   | The user's birthday |
+| `zoneInfo`              | `String` | The user's time zone, e.g. `Europe/Paris` or `America/Los_Angeles` |
+| `locale`                | `String` | The end-users locale, represented as a BCP47 language tag<sup>3</sup> |
+| `address`               | `UserAddress` | The user's preferred postal address |
+| `updatedAt`             | `Date`   | The time the user's information was last updated |
+| `allClaims`             | `Map<String, Any>` | The full collection of claims received from the server |
+
+If the `address` is provided, then `UserAddress` contains the following properties:
+
+| Property                | Type     | Description |
+|-------------------------|----------|-------------|
+| `formatted`             | `String` | The full mailing address, with multiple lines if necessary |
+| `street`                | `String` | The street address component, which may include house number, street name, post office box, and other multi-line information |
+| `locality`              | `String` | City or locality component |
+| `region`                | `String` | State, province, prefecture or region component |
+| `postalCode`            | `String` | Zip code or postal code component |
+| `country`               | `String` | Country name component |
+| `allClaims`             | `Map<String, Any>` | Full collection of claims received from the server |
+
+> Notes:
+> 1. Value is false also when a claim is not present in the `allClaims` dictionary
+> 2. Phone number is typically in E.164 format, for example `+1 (425) 555-1212` or `+56 (2) 687 2400`
+> 3. This is typically an ISO 639-1 Alpha-2 language code in lowercase and an ISO 3166-1 Alpha-2 country code in uppercase, separated by a dash. For example, `en-US` or `fr-CA`
+
+<!-- begin box info -->
+Be aware that all properties in the `UserInfo` and `UserAddress` objects are optional and the availability of information depends on actual implementation on the server.
+<!-- end -->
+
 
 ### Password Strength Indicator
 
@@ -2611,9 +2473,8 @@ Choosing a weak passphrase in applications with high-security demands can be pot
 
 ### Debug Build Detection
 
-It is sometimes useful to switch PowerAuth SDK to a DEBUG build configuration to get more logs from the library. The DEBUG build is usually helpful during the application development, but on the other hand, it's highly unwanted in production applications. For this purpose, the `PowerAuthSDK.hasDebugFeatures()` method provides information whether the PowerAuth JNI library was compiled in DEBUG configuration. It is a good practice to check this flag and crash the process when the production application is linked against the DEBUG PowerAuth:
+It is sometimes useful to switch PowerAuth SDK to a DEBUG build configuration to get more logs from the library. The DEBUG build is usually helpful during application development, but on the other hand, it's highly unwanted in production applications. For this purpose, the `PowerAuthSDK.hasDebugFeatures()` method provides information on whether the PowerAuth JNI library was compiled in the DEBUG configuration. It is a good practice to check this flag and crash the process when the production application is linked against the DEBUG PowerAuth:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 if (!BuildConfig.DEBUG) {
     // You can also check your production build configuration
@@ -2622,58 +2483,34 @@ if (!BuildConfig.DEBUG) {
     }
 }
 ```
-```java
-if (!BuildConfig.DEBUG) {
-    // You can also check your production build configuration
-    if (powerAuthSDK.hasDebugFeatures()) {
-        throw new RuntimeException("Production app with DEBUG PowerAuth");
-    }
-}
-```
-<!-- end -->
 
 ### Request Interceptors
 
 The `PowerAuthClientConfiguration` can contain multiple request interceptor objects, allowing you to adjust all HTTP requests created by SDK, before execution. Currently, you can use the following two classes:
 
-- `BasicHttpAuthenticationRequestInterceptor` to add basic HTTP authentication header to all requests
+- `BasicHttpAuthenticationRequestInterceptor` to add a basic HTTP authentication header to all requests
 - `CustomHeaderRequestInterceptor` to add a custom HTTP header to all requests
 
 For example:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val clientConfiguration = PowerAuthClientConfiguration.Builder()
     .requestInterceptor(BasicHttpAuthenticationRequestInterceptor("gateway-user", "gateway-password"))
     .requestInterceptor(CustomHeaderRequestInterceptor("X-CustomHeader", "123456"))
     .build()
 ```
-```java
-final PowerAuthClientConfiguration clientConfiguration = new PowerAuthClientConfiguration.Builder()
-            .requestInterceptor(new BasicHttpAuthenticationRequestInterceptor("gateway-user", "gateway-password"))
-            .requestInterceptor(new CustomHeaderRequestInterceptor("X-CustomHeader", "123456"))
-            .build();
-```
-<!-- end -->
 
 We don't recommend implementing the `HttpRequestInterceptor` interface on your own. The interface allows you to tweak the requests created in the `PowerAuthSDK` but also gives you an opportunity to break things. So, rather than create your own interceptor, try to contact us and describe what's your problem with the networking in the PowerAuth SDK. Also, keep in mind that the interface may change in the future. We can guarantee the API stability of public classes implementing this interface, but not the stability of the interface itself.
 
 ### Custom User-Agent
 
-The `PowerAuthClientConfiguration` contains `userAgent` property that allows you to set a custom value for "User-Agent" HTTP request header for all requests initiated by the library:
+The `PowerAuthClientConfiguration` contains the `userAgent` property that allows you to set a custom value for the "User-Agent" HTTP request header for all requests initiated by the library:
 
-<!-- begin codetabs Kotlin Java -->
 ```kotlin
 val clientConfiguration = PowerAuthClientConfiguration.Builder()
     .userAgent("MyApp/1.0.0")
     .build()
 ```
-```java
-final PowerAuthClientConfiguration clientConfiguration = new PowerAuthClientConfiguration.Builder()
-                .userAgent("MyApp/1.0.0")
-                .build();
-```
-<!-- end -->
 
 The default value of the property is composed as "APP-PACKAGE/APP-PACKAGE-VERSION PowerAuth2/PA-VERSION (OS/OS-VERSION, DEVICE-INFO)", for example: "com.test.app/1.0 PowerAuth2/1.7.0 (Android 11.0.0, SM-A525F)".
 

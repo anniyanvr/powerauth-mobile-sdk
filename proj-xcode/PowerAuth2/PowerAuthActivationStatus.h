@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthMacros.h>
+#import "PowerAuthMacros.h"
 
 /**
  The PowerAuthActivationState enum defines all possible states of activation.
@@ -22,10 +22,6 @@
  of the PowerAuthActivationStatus object.
  */
 typedef NS_ENUM(NSInteger, PowerAuthActivationState) {
-    /**
-     The activation is just created.
-     */
-    PowerAuthActivationState_Created  = 1,
     /**
      The activation is not completed yet on the server.
      */
@@ -44,9 +40,9 @@ typedef NS_ENUM(NSInteger, PowerAuthActivationState) {
     PowerAuthActivationState_Removed  = 5,
     /**
      The activation is technically blocked. You cannot use it anymore
-     for the signature calculations.
+     for the authentication code calculations.
      */
-    PowerAuthActivationState_Deadlock   = 128,
+    PowerAuthActivationState_Deadlock = 128,
 };
 
 /**
@@ -74,10 +70,13 @@ typedef NS_ENUM(NSInteger, PowerAuthActivationState) {
  */
 @property (nonatomic, assign, readonly) UInt32 remainingAttempts;
 /**
+ Contains YES if upgrade to a newer protocol version is available.
+ */
+@property (nonatomic, assign, readonly) BOOL isProtocolUpgradeAvailable;
+/**
  Contains custom object returned from the server. The value is optional and PowerAuth Application Server
  must support this custom object.
  */
 @property (nonatomic, strong, nullable, readonly) NSDictionary<NSString*, NSObject*>* customObject;
 
 @end
-

@@ -14,18 +14,28 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthActivationResult.h>
+#import "PowerAuthActivationResult+Private.h"
+
+#import <PowerAuthCore/PowerAuthCore.h>
 
 @implementation PowerAuthActivationResult
 
-#ifdef DEBUG
+- (instancetype) initWithCoreActivationResult:(PowerAuthCoreActivationResult*)result
+{
+    self = [super init];
+    if (self) {
+        _activationFingerprint = result.activationFingerprint;
+        _customAttributes = result.customAttributes;
+        _userInfo = [[PowerAuthUserInfo alloc] initWithDictionary:result.userInfo];
+    }
+    return self;
+}
+
 - (NSString*) description
 {
     NSString * fingerprint = _activationFingerprint ? _activationFingerprint : @"<null>";
-    NSString * rc = _activationRecovery ? [@", recovery=" stringByAppendingString:[_activationRecovery description]] : @"";
     NSString * attrs = _customAttributes ? [@", attributes=" stringByAppendingString:[_customAttributes description]] : @"";
-    return [NSString stringWithFormat:@"<PowerAuthActivationResult fingerprint=%@%@%@>", fingerprint, rc,attrs];
+    return [NSString stringWithFormat:@"<PowerAuthActivationResult fingerprint=%@%@>", fingerprint, attrs];
 }
-#endif
 
 @end

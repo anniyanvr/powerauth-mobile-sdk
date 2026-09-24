@@ -14,28 +14,29 @@
  * limitations under the License.
  */
 
-#import <PowerAuth2/PowerAuthAuthentication.h>
-#import <PowerAuth2/PowerAuthKeychainAuthentication.h>
-#import <PowerAuth2/PowerAuthLog.h>
+#import "PowerAuthAuthentication.h"
+#import "PowerAuthKeychainAuthentication.h"
+#import "PowerAuthLog.h"
 #import "PowerAuthAuthentication+Private.h"
+#import "PA2PrivateMacros.h"
 
-@import PowerAuthCore;
+#import <PowerAuthCore/PowerAuthCore.h>
 
 @implementation PowerAuthAuthentication
 {
     NSInteger _objectUsage;
 }
 
-#define AUTH_FOR_COMMIT         1
+#define AUTH_FOR_PERSIST        1
 #define AUTH_FOR_SIGN           2
 
 - (id) initWithObjectUsage:(NSInteger)objectUsage
-                  password:(PowerAuthCorePassword*)password
+                  password:(PowerAuthPassword*)password
                   biometry:(BOOL)biometry
             biometryPrompt:(NSString*)biometryPrompt
            biometryContext:(id)biometryContext
-       customPossessionKey:(NSData*)customPossessionKey
-         customBiometryKey:(NSData*)customBiometryKey
+       customPossessionKey:(PowerAuthSecureData*)customPossessionKey
+         customBiometryKey:(PowerAuthSecureData*)customBiometryKey
 {
     self = [super init];
     if (self) {
@@ -46,7 +47,7 @@
         _biometryPrompt = biometryPrompt;
         _biometryContext = biometryContext;
         _overridenPossessionKey = customPossessionKey;
-        _overridenBiometryKey = customBiometryKey;
+        _customBiometryKey = customBiometryKey;
     }
     return self;
 }
@@ -61,7 +62,7 @@
         copy->_password = _password;
         copy->_biometryPrompt = _biometryPrompt;
         copy->_overridenPossessionKey = _overridenPossessionKey;
-        copy->_overridenBiometryKey = _overridenBiometryKey;
+        copy->_customBiometryKey = _customBiometryKey;
 #if PA2_HAS_LACONTEXT == 1
         copy->_biometryContext = _biometryContext;
 #endif
@@ -71,27 +72,24 @@
 
 - (PowerAuthKeychainAuthentication *) keychainAuthentication
 {
+    if (_useBiometry) {
 #if PA2_HAS_LACONTEXT == 1
-    if (_biometryContext) {
-        return [[PowerAuthKeychainAuthentication alloc] initWithContext:_biometryContext];
-    }
+        if (_biometryContext) {
+            return [[PowerAuthKeychainAuthentication alloc] initWithContext:_biometryContext];
+        }
 #endif // PA2_HAS_LACONTEXT
-    if (_biometryPrompt) {
-        return [[PowerAuthKeychainAuthentication alloc] initWithPrompt:_biometryPrompt];
+        return [[PowerAuthKeychainAuthentication alloc] initWithPrompt:_biometryPrompt ? _biometryPrompt : @"< missing prompt >"];
     }
     return nil;
 }
 
-#if DEBUG
 - (NSString*) description
 {
     NSString * usage_str;
     if (_objectUsage == AUTH_FOR_SIGN) {
         usage_str = @"for sign";
-    } else if (_objectUsage == AUTH_FOR_COMMIT) {
-        usage_str = @"for commit";
     } else {
-        usage_str = @"legacy";
+        usage_str = @"for persist";
     }
     NSMutableArray * factors = [NSMutableArray arrayWithCapacity:3];
     if (_usePossession) {
@@ -113,7 +111,7 @@
         [info addObject:@"+context"];
     }
 #endif
-    if (_overridenBiometryKey) {
+    if (_customBiometryKey) {
         [info addObject:@"+extBK"];
     }
     if (_overridenPossessionKey) {
@@ -122,64 +120,51 @@
     NSString * info_str = info.count == 0 ? @"" : [@", " stringByAppendingString:[info componentsJoinedByString:@" "]];
     return [NSString stringWithFormat:@"<PowerAuthAuthentication %@: %@%@>", usage_str, factors_str, info_str];
 }
-#endif
-
-// PA2_DEPRECATED(1.7.2) // getter deprecated in 1.7.2
-- (NSString*) usePassword
-{
-    __block NSString * result = nil;
-    if (_password) {
-        // The purpose of 'validatePasswordComplexity' is quite different, but there's no other API to extract
-        // plaintext passphrase from PowerAuthCorePassword. We're keeping this only for a compatibility reasons,
-        // so the implementation will be removed in 1.8.x release.
-        [_password validatePasswordComplexity:^NSInteger(const char * passphrase, NSInteger length) {
-            result = [[NSString alloc] initWithBytes:passphrase length:length encoding:NSUTF8StringEncoding];
-            return 0;
-        }];
-    }
-    return result;
-}
-
-// PA2_DEPRECATED(1.7.0) // setter was already deprecated in 1.7.0
-- (void) setUsePassword:(NSString *)usePassword
-{
-    _password = [PowerAuthCorePassword passwordWithString:usePassword];
-}
 
 @end
 
 
 @implementation PowerAuthAuthentication (EasyAccessors)
 
-// MARK: - Commit, Possession + Knowledge
+// MARK: - Persist, Possession + Knowledge
 
-+ (PowerAuthAuthentication*) commitWithPassword:(NSString*)password
++ (PowerAuthAuthentication*) persistWithPassword:(NSString*)password
 {
-    return [self commitWithCorePassword:[PowerAuthCorePassword passwordWithString:password]];
+    return [self persistWithCorePassword:[PowerAuthPassword passwordWithString:password]];
 }
 
-+ (PowerAuthAuthentication*) commitWithPassword:(NSString*)password
-                            customPossessionKey:(NSData*)customPossessionKey
+// PA2_DEPRECATED(2.0.0)
++ (PowerAuthAuthentication*) persistWithPassword:(NSString*)password
+                             customPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
-    return [self commitWithCorePassword:[PowerAuthCorePassword passwordWithString:password]
-                    customPossessionKey:customPossessionKey];
+    return [self persistWithCorePassword:[PowerAuthPassword passwordWithString:password]
+                     customPossessionKey:customPossessionKey];
 }
 
-// MARK: Commit, Possession + Knowledge + Biometry
+// MARK: Persist, Possession + Knowledge + Biometry
 
-+ (PowerAuthAuthentication*) commitWithPasswordAndBiometry:(NSString*)password
++ (PowerAuthAuthentication*) persistWithPasswordAndBiometry:(NSString*)password
 {
-    return [self commitWithCorePasswordAndBiometry:[PowerAuthCorePassword passwordWithString:password]];
+    return [self persistWithCorePasswordAndBiometry:[PowerAuthPassword passwordWithString:password]];
 }
 
-+ (PowerAuthAuthentication*) commitWithPasswordAndBiometry:(NSString*)password
-                                         customBiometryKey:(NSData*)customBiometryKey
-                                       customPossessionKey:(NSData*)customPossessionKey
++ (PowerAuthAuthentication*) persistWithPasswordAndBiometry:(NSString*)password
+                                          customBiometryKey:(PowerAuthSecureData*)customBiometryKey
 {
-    return [self commitWithCorePasswordAndBiometry:[PowerAuthCorePassword passwordWithString:password]
-                                 customBiometryKey:customBiometryKey
-                               customPossessionKey:customPossessionKey];
+    return [self persistWithCorePasswordAndBiometry:[PowerAuthPassword passwordWithString:password]
+                                  customBiometryKey:customBiometryKey];
 }
+
+// PA2_DEPRECATED(2.0.0)
++ (PowerAuthAuthentication*) persistWithPasswordAndBiometry:(NSString*)password
+                                          customBiometryKey:(PowerAuthSecureData*)customBiometryKey
+                                        customPossessionKey:(PowerAuthSecureData*)customPossessionKey
+{
+    return [self persistWithCorePasswordAndBiometry:[PowerAuthPassword passwordWithString:password]
+                                  customBiometryKey:customBiometryKey
+                                customPossessionKey:customPossessionKey];
+}
+
 
 // MARK: - Signing, Possession only
 
@@ -194,7 +179,8 @@
                                               customBiometryKey:nil];
 }
 
-+ (PowerAuthAuthentication *) possessionWithCustomPossessionKey:(NSData*)customPossessionKey
+// PA2_DEPRECATED(2.0.0)
++ (PowerAuthAuthentication *) possessionWithCustomPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
     return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_SIGN
                                                        password:nil
@@ -229,8 +215,9 @@
                                               customBiometryKey:nil];
 }
 
+// PA2_DEPRECATED(2.0.0)
 + (PowerAuthAuthentication *) possessionWithBiometryPrompt:(NSString*)biometryPrompt
-                                       customPossessionKey:(NSData*)customPossessionKey
+                                       customPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
     return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_SIGN
                                                        password:nil
@@ -241,8 +228,20 @@
                                               customBiometryKey:nil];
 }
 
-+ (PowerAuthAuthentication *) possessionWithBiometryWithCustomBiometryKey:(NSData*)customBiometryKey
-                                                      customPossessionKey:(NSData*)customPossessionKey
++ (PowerAuthAuthentication *) possessionWithBiometryWithCustomBiometryKey:(PowerAuthSecureData*)customBiometryKey
+{
+    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_SIGN
+                                                       password:nil
+                                                       biometry:YES
+                                                 biometryPrompt:nil
+                                                biometryContext:nil
+                                            customPossessionKey:nil
+                                              customBiometryKey:customBiometryKey];
+}
+
+// PA2_DEPRECATED(2.0.0)
++ (PowerAuthAuthentication *) possessionWithBiometryWithCustomBiometryKey:(PowerAuthSecureData*)customBiometryKey
+                                                      customPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
     return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_SIGN
                                                        password:nil
@@ -264,8 +263,10 @@
                                             customPossessionKey:nil
                                               customBiometryKey:nil];
 }
+
+// PA2_DEPRECATED(2.0.0)
 + (PowerAuthAuthentication *) possessionWithBiometryContext:(LAContext*)context
-                                        customPossessionKey:(NSData*)customPossessionKey
+                                        customPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
     return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_SIGN
                                                        password:nil
@@ -281,38 +282,26 @@
 
 + (PowerAuthAuthentication *) possessionWithPassword:(NSString *)password
 {
-    return [self possessionWithCorePassword:[PowerAuthCorePassword passwordWithString:password]];
+    return [self possessionWithCorePassword:[PowerAuthPassword passwordWithString:password]];
 }
 
+// PA2_DEPRECATED(2.0.0)
 + (PowerAuthAuthentication *) possessionWithPassword:(NSString*)password
-                                 customPossessionKey:(NSData*)customPossessionKey
+                                 customPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
-    return [self possessionWithCorePassword:[PowerAuthCorePassword passwordWithString:password]
+    return [self possessionWithCorePassword:[PowerAuthPassword passwordWithString:password]
                         customPossessionKey:customPossessionKey];
-}
-
-#pragma mark - Deprecated
-
-// PA2_DEPRECATED(1.7.0)
-+ (PowerAuthAuthentication *) possessionWithBiometryWithPrompt:(NSString *)biometryPrompt
-{
-    return [self possessionWithBiometryPrompt:biometryPrompt];
-}
-// PA2_DEPRECATED(1.7.0)
-+ (PowerAuthAuthentication *) possessionWithPasswordDeprecated:(NSString*)password
-{
-    return [self possessionWithPassword:password];
 }
 
 @end
 
-#pragma mark - PowerAuthCorePassword
+#pragma mark - PowerAuthPassword
 
 @implementation PowerAuthAuthentication (CorePassword)
 
-+ (PowerAuthAuthentication*) commitWithCorePassword:(PowerAuthCorePassword*)password
++ (PowerAuthAuthentication*) persistWithCorePassword:(PowerAuthPassword*)password
 {
-    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_COMMIT
+    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_PERSIST
                                                        password:password
                                                        biometry:NO
                                                  biometryPrompt:nil
@@ -321,10 +310,11 @@
                                               customBiometryKey:nil];
 }
 
-+ (PowerAuthAuthentication*) commitWithCorePassword:(PowerAuthCorePassword*)password
-                                customPossessionKey:(NSData*)customPossessionKey
+// PA2_DEPRECATED(2.0.0)
++ (PowerAuthAuthentication*) persistWithCorePassword:(PowerAuthPassword*)password
+                                 customPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
-    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_COMMIT
+    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_PERSIST
                                                        password:password
                                                        biometry:NO
                                                  biometryPrompt:nil
@@ -333,9 +323,9 @@
                                               customBiometryKey:nil];
 }
 
-+ (PowerAuthAuthentication*) commitWithCorePasswordAndBiometry:(PowerAuthCorePassword*)password
++ (PowerAuthAuthentication*) persistWithCorePasswordAndBiometry:(PowerAuthPassword*)password
 {
-    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_COMMIT
+    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_PERSIST
                                                        password:password
                                                        biometry:YES
                                                  biometryPrompt:nil
@@ -344,11 +334,24 @@
                                               customBiometryKey:nil];
 }
 
-+ (PowerAuthAuthentication*) commitWithCorePasswordAndBiometry:(PowerAuthCorePassword*)password
-                                             customBiometryKey:(NSData*)customBiometryKey
-                                           customPossessionKey:(NSData*)customPossessionKey
++ (PowerAuthAuthentication*) persistWithCorePasswordAndBiometry:(PowerAuthPassword*)password
+                                              customBiometryKey:(PowerAuthSecureData*)customBiometryKey
 {
-    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_COMMIT
+    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_PERSIST
+                                                       password:password
+                                                       biometry:YES
+                                                 biometryPrompt:nil
+                                                biometryContext:nil
+                                            customPossessionKey:nil
+                                              customBiometryKey:customBiometryKey];
+}
+
+// PA2_DEPRECATED(2.0.0)
++ (PowerAuthAuthentication*) persistWithCorePasswordAndBiometry:(PowerAuthPassword*)password
+                                              customBiometryKey:(PowerAuthSecureData*)customBiometryKey
+                                            customPossessionKey:(PowerAuthSecureData*)customPossessionKey
+{
+    return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_PERSIST
                                                        password:password
                                                        biometry:YES
                                                  biometryPrompt:nil
@@ -357,7 +360,7 @@
                                               customBiometryKey:customBiometryKey];
 }
 
-+ (PowerAuthAuthentication *) possessionWithCorePassword:(PowerAuthCorePassword*)password
++ (PowerAuthAuthentication *) possessionWithCorePassword:(PowerAuthPassword*)password
 {
     return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_SIGN
                                                        password:password
@@ -368,8 +371,9 @@
                                               customBiometryKey:nil];
 }
 
-+ (PowerAuthAuthentication *) possessionWithCorePassword:(PowerAuthCorePassword*)password
-                                     customPossessionKey:(NSData*)customPossessionKey
+// PA2_DEPRECATED(2.0.0)
++ (PowerAuthAuthentication *) possessionWithCorePassword:(PowerAuthPassword*)password
+                                     customPossessionKey:(PowerAuthSecureData*)customPossessionKey
 {
     return [[PowerAuthAuthentication alloc] initWithObjectUsage:AUTH_FOR_SIGN
                                                        password:password
@@ -396,21 +400,29 @@
     return result;
 }
 
-- (BOOL) validateUsage:(BOOL)forCommit
+- (NSError*) validateUsage:(BOOL)forPersist
 {
-    if (_objectUsage == 0) {
-        PowerAuthLog(@"WARNING: Using PowerAuthAuthentication object created with legacy constructor.");
-        return NO;
+    NSString * errorMessage;
+    PowerAuthErrorCode errorCode = PowerAuthErrorCode_WrongParameter;
+    if (forPersist != (_objectUsage == AUTH_FOR_PERSIST)) {
+        errorMessage = forPersist
+            ? @"Using PowerAuthAuthentication object for a different purpose. The object for activation persist is expected."
+            : @"Using PowerAuthAuthentication object for a different purpose. The object for authentication code calculation is expected.";
+    } else if (_overridenPossessionKey) {
+        errorMessage = @"Using PowerAuthAuthentication with a custom possession key is no longer supported.";
+#if !defined(PA2_BIOMETRY_SUPPORT)
+    } else if (_useBiometry) {
+        errorMessage = @"Biometry is not supported on this device.";
+        errorCode = PowerAuthErrorCode_BiometryNotAvailable;
+#endif // !defined(PA2_BIOMETRY_SUPPORT)
+    } else {
+        errorMessage = nil;
     }
-    if (forCommit != (_objectUsage == AUTH_FOR_COMMIT)) {
-        if (forCommit) {
-            PowerAuthLog(@"WARNING: Using PowerAuthAuthentication object for a different purpose. The object for activation commit is expected.");
-        } else {
-            PowerAuthLog(@"WARNING: Using PowerAuthAuthentication object for a different purpose. The object for signature calculation is expected.");
-        }
-        return NO;
+
+    if (errorMessage) {
+        return PA2MakeError(errorCode, errorMessage);
     }
-    return YES;
+    return nil;
 }
 
 @end

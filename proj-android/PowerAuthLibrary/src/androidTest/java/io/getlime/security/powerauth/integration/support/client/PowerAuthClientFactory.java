@@ -23,6 +23,9 @@ import io.getlime.security.powerauth.integration.support.PowerAuthTestConfig;
 import io.getlime.security.powerauth.integration.support.model.ServerVersion;
 import io.getlime.security.powerauth.integration.support.v10.PowerAuthClientV3_ServerV10;
 import io.getlime.security.powerauth.integration.support.v13.PowerAuthClientV3_ServerV13;
+import io.getlime.security.powerauth.integration.support.v15.PowerAuthClientV3_ServerV15;
+import io.getlime.security.powerauth.integration.support.v19.PowerAuthClientV3_ServerV19;
+import io.getlime.security.powerauth.integration.support.v20.PowerAuthClientV4_ServerV20;
 
 /**
  * The {@code PowerAuthClientFactory} provides client that communicate with PowerAuth Server API,
@@ -40,12 +43,17 @@ public class PowerAuthClientFactory {
      */
     public PowerAuthServerApi createApiClient(@NonNull PowerAuthTestConfig testConfig) throws Exception {
         PowerAuthServerApi api = null;
-        if (testConfig.getServerVersion().numericVersion >= ServerVersion.V1_0_0.numericVersion &&
-                testConfig.getServerVersion().numericVersion <= ServerVersion.V1_2_5.numericVersion) {
+        final int numVer = testConfig.getServerVersion().numericVersion;
+        if (numVer >= ServerVersion.V1_0_0.numericVersion && numVer < ServerVersion.V1_3_0.numericVersion) {
             api = new PowerAuthClientV3_ServerV10(testConfig.getServerApiUrl(), testConfig.getAuthorizationHeaderValue(), ServerVersion.V1_0_0, ServerVersion.V1_2_5);
-        } else if (testConfig.getServerVersion().numericVersion >= ServerVersion.V1_3_0.numericVersion &&
-                testConfig.getServerVersion().numericVersion <= ServerVersion.LATEST.numericVersion) {
-            api = new PowerAuthClientV3_ServerV13(testConfig.getServerApiUrl(), testConfig.getAuthorizationHeaderValue(), ServerVersion.V1_3_0, null);
+        } else if (numVer >= ServerVersion.V1_3_0.numericVersion && numVer < ServerVersion.V1_5_0.numericVersion) {
+            api = new PowerAuthClientV3_ServerV13(testConfig.getServerApiUrl(), testConfig.getAuthorizationHeaderValue(), ServerVersion.V1_3_0, ServerVersion.V1_4_0);
+        } else if (numVer >= ServerVersion.V1_5_0.numericVersion && numVer <= ServerVersion.V1_8_0.numericVersion) {
+            api = new PowerAuthClientV3_ServerV15(testConfig.getServerApiUrl(), testConfig.getAuthorizationHeaderValue(), ServerVersion.V1_5_0, ServerVersion.V1_8_0);
+        } else if (numVer >= ServerVersion.V1_9_0.numericVersion && numVer <= ServerVersion.V1_10_0.numericVersion) {
+            api = new PowerAuthClientV3_ServerV19(testConfig.getServerApiUrl(), testConfig.getAuthorizationHeaderValue(), ServerVersion.V1_9_0, ServerVersion.V1_10_0);
+        } else if (numVer >= ServerVersion.V2_0_0.numericVersion) {
+            api = new PowerAuthClientV4_ServerV20(testConfig.getServerApiUrl(), testConfig.getAuthorizationHeaderValue(), ServerVersion.V2_0_0, null);
         }
         if (api == null) {
             throw new Exception("Missing implementation for server API, for server version " + testConfig.getServerVersion().version);

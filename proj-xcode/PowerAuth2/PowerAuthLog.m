@@ -20,7 +20,7 @@
 #import "PowerAuthLog.h"
 
 #if PA2_HAS_CORE_MODULE
-@import PowerAuthCore;
+#import <PowerAuthCore/PowerAuthCore.h>
 #else
 #define PowerAuthCoreLogSetEnabled(x)
 #endif
@@ -28,9 +28,11 @@
 #ifdef ENABLE_PA2_LOG
 static BOOL s_log_enabled = NO;
 static BOOL s_log_verbose = NO;
+static BOOL s_log_to_console = YES;
+static id<PowerAuthLogDelegate> s_log_delegate = nil;
 void PowerAuthLogImpl(NSString * format, ...)
 {
-    if (!s_log_enabled) {
+    if (!s_log_enabled || (!s_log_to_console && !s_log_delegate)) {
         return;
     }
     va_list args;
@@ -38,7 +40,13 @@ void PowerAuthLogImpl(NSString * format, ...)
     NSString * message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
     
-    NSLog(@"[PowerAuth] %@", message);
+    if (s_log_delegate) {
+        [s_log_delegate powerAuthLog:message];
+    }
+    
+    if (s_log_to_console) {
+        NSLog(@"[PowerAuth] %@", message);
+    }
 }
 #endif // ENABLE_PA2_LOG
 
@@ -77,6 +85,22 @@ BOOL PowerAuthLogIsVerbose(void)
 #endif
 }
 
+void PowerAuthLogToConsoleSetEnabled(BOOL enabled)
+{
+#ifdef ENABLE_PA2_LOG
+    s_log_to_console = enabled;
+#endif
+}
+
+BOOL PowerAuthLogToConsoleIsEnabled(void)
+{
+#ifdef ENABLE_PA2_LOG
+    return s_log_to_console;
+#else
+    return NO;
+#endif
+}
+
 void PowerAuthCriticalWarning(NSString * format, ...)
 {
     va_list args;
@@ -85,4 +109,11 @@ void PowerAuthCriticalWarning(NSString * format, ...)
     va_end(args);
     
     NSLog(@"[PowerAuth] CRITICAL WARNING: %@", message);
+}
+
+void PowerAuthLogSetDelegate(id<PowerAuthLogDelegate> delegate)
+{
+#ifdef ENABLE_PA2_LOG
+    s_log_delegate = delegate;
+#endif
 }

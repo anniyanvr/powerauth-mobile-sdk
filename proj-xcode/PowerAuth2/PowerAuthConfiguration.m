@@ -17,22 +17,80 @@
 // PA2_SHARED_SOURCE PowerAuth2ForWatch .
 // PA2_SHARED_SOURCE PowerAuth2ForExtensions .
 
-#import <PowerAuth2/PowerAuthConfiguration.h>
+#import "PowerAuthConfiguration.h"
+#import "PowerAuthLog.h"
+#import <PowerAuthCore/PowerAuthCore.h>
+#import "PA2PrivateMacros.h"
 
 @implementation PowerAuthConfiguration
 
-- (BOOL) validateConfiguration
+#define MIN_OFFLINE_AUTH_CODE_COMPONENT_LEN 4
+#define MAX_OFFLINE_AUTH_CODE_COMPONENT_LEN 8
+
+- (id) init
 {
-    BOOL result = YES;
-    result = result && (_instanceId != nil);
-    result = result && (_appKey != nil);
-    result = result && (_appSecret != nil);
-    result = result && (_masterServerPublicKey != nil);
-    result = result && (_baseEndpointUrl != nil);
-    if (_sharingConfiguration) {
-        result = result && [_sharingConfiguration validateConfiguration];
+    self = [super init];
+    if (self) {
+        _algorithm = PowerAuthAlgorithm_DEFAULT;
+        _offlineAuthenticationCodeComponentLength = MAX_OFFLINE_AUTH_CODE_COMPONENT_LEN;
     }
-    return result;
+    return self;
+}
+
+- (id) initWithInstanceId:(NSString *)instanceId baseEndpointUrl:(NSString *)baseEndpointUrl configuration:(NSString *)configuration algorithm:(PowerAuthAlgorithm)algorithm
+{
+    self = [super init];
+    if (self) {
+        _instanceId = instanceId;
+        _baseEndpointUrl = baseEndpointUrl;
+        _configuration = configuration;
+        _algorithm = algorithm;
+        _offlineAuthenticationCodeComponentLength = MAX_OFFLINE_AUTH_CODE_COMPONENT_LEN;
+    }
+    return self;
+}
+
+- (id) initWithInstanceId:(NSString *)instanceId baseEndpointUrl:(NSString *)baseEndpointUrl configuration:(NSString *)configuration
+{
+    return [self initWithInstanceId:instanceId baseEndpointUrl:baseEndpointUrl configuration:configuration algorithm:PowerAuthAlgorithm_DEFAULT];
+}
+
+- (BOOL) validateConfiguration // PA2_DEPRECATED(2.0.0)
+{
+    return [self validateConfiguration:nil];
+}
+
+- (BOOL) validateConfiguration:(NSError**)error
+{
+    if (!_instanceId.length) {
+        PA2SetError(error, PowerAuthErrorCode_WrongParameter, @"PowerAuthConfiguration.instanceId property is empty");
+        return NO;
+    }
+    if (!_baseEndpointUrl.length) {
+        PA2SetError(error, PowerAuthErrorCode_WrongParameter, @"PowerAuthConfiguration.baseEndpointUrl property is empty");
+        return NO;
+    }
+    if (![NSURL URLWithString:_baseEndpointUrl]) {
+        PA2SetError(error, PowerAuthErrorCode_WrongParameter, @"PowerAuthConfiguration.baseEndpointUrl is not valid URL");
+        return NO;
+    }
+    if (_offlineAuthenticationCodeComponentLength < MIN_OFFLINE_AUTH_CODE_COMPONENT_LEN ||
+        _offlineAuthenticationCodeComponentLength > MAX_OFFLINE_AUTH_CODE_COMPONENT_LEN) {
+        PA2SetError(error, PowerAuthErrorCode_WrongParameter, @"PowerAuthConfiguration.offlineAuthenticationCodeComponentLength property is out of range");
+        return NO;
+    }
+    if (_sharingConfiguration && ![_sharingConfiguration validateConfiguration:error]) {
+        return NO;
+    }
+    NSError * localError = nil;
+    [PowerAuthCoreConfig validateConfiguration:_configuration
+                                     algorithm:(PowerAuthCoreAlgorithm)_algorithm
+                                         error:&localError];
+    if (localError) {
+        PA2WrapError(localError, error);
+        return NO;
+    }
+    return YES;
 }
 
 - (id)copyWithZone:(NSZone *)zone
@@ -41,15 +99,38 @@
     if (c) {
         c->_instanceId = _instanceId;
         c->_baseEndpointUrl = _baseEndpointUrl;
-        c->_appKey = _appKey;
-        c->_appSecret = _appSecret;
-        c->_masterServerPublicKey = _masterServerPublicKey;
+        c->_configuration = _configuration;
+        c->_algorithm = _algorithm;
         c->_keychainKey_Biometry = _keychainKey_Biometry;
-        c->_externalEncryptionKey = _externalEncryptionKey;
         c->_disableAutomaticProtocolUpgrade = _disableAutomaticProtocolUpgrade;
+        c->_offlineAuthenticationCodeComponentLength = _offlineAuthenticationCodeComponentLength;
         c->_sharingConfiguration = [_sharingConfiguration copy];
     }
     return c;
+}
+
+// PA2_DEPRECATED(2.0.0)
+- (void) setOfflineSignatureComponentLength:(NSUInteger)offlineSignatureComponentLength
+{
+    _offlineAuthenticationCodeComponentLength = offlineSignatureComponentLength;
+}
+// PA2_DEPRECATED(2.0.0)
+- (NSUInteger) offlineSignatureComponentLength
+{
+    return _offlineAuthenticationCodeComponentLength;
+}
+
+// PA2_DEPRECATED(2.0.0)
+- (void) setExternalEncryptionKey:(PowerAuthCoreData *)externalEncryptionKey
+{
+    if (externalEncryptionKey) {
+        PowerAuthLog(@"WARNING: EEK is not supported in this version of SDK");
+    }
+}
+// PA2_DEPRECATED(2.0.0)
+- (PowerAuthCoreData*) externalEncryptionKey
+{
+    return nil;
 }
 
 @end

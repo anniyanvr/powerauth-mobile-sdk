@@ -22,14 +22,21 @@ public enum ProtocolVersion {
     V2(20, "2.0"),
     V2_1(21, "2.1"),
     V3(30, "3.0"),
-    V3_1(31, "3.1");
+    V3_1(31, "3.1"),
+    V3_2(32, "3.2"),
+    V3_3(33, "3.3"),
+    V4_0(40, "4.0");
 
-    public int version;
-    public String versionForHeader;
+    public final int version;
+    public final String versionForHeader;
 
     ProtocolVersion(int version, String versionForHeader) {
         this.version = version;
         this.versionForHeader = versionForHeader;
+    }
+
+    public boolean isV3() {
+        return version >= 30 && version <= 33;
     }
 
     public static @NonNull ProtocolVersion versionFromInt(int version) {

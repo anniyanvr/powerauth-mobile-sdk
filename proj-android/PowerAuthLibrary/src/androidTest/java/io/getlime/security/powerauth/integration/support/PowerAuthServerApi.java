@@ -20,6 +20,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import java.util.List;
+import java.util.Map;
 
 import io.getlime.security.powerauth.integration.support.model.Activation;
 import io.getlime.security.powerauth.integration.support.model.ActivationDetail;
@@ -27,12 +28,16 @@ import io.getlime.security.powerauth.integration.support.model.ActivationOtpVali
 import io.getlime.security.powerauth.integration.support.model.Application;
 import io.getlime.security.powerauth.integration.support.model.ApplicationDetail;
 import io.getlime.security.powerauth.integration.support.model.ApplicationVersion;
+import io.getlime.security.powerauth.integration.support.model.AuthenticationCodeData;
+import io.getlime.security.powerauth.integration.support.model.AuthenticationResult;
 import io.getlime.security.powerauth.integration.support.model.OfflineSignaturePayload;
-import io.getlime.security.powerauth.integration.support.model.RecoveryConfig;
+import io.getlime.security.powerauth.integration.support.model.ProtocolVersion;
 import io.getlime.security.powerauth.integration.support.model.ServerVersion;
-import io.getlime.security.powerauth.integration.support.model.SignatureData;
-import io.getlime.security.powerauth.integration.support.model.SignatureInfo;
+import io.getlime.security.powerauth.integration.support.model.SignatureFormat;
+import io.getlime.security.powerauth.integration.support.model.SignatureType;
 import io.getlime.security.powerauth.integration.support.model.TokenInfo;
+import io.getlime.security.powerauth.sdk.PowerAuthAlgorithm;
+import io.getlime.security.powerauth.sdk.PowerAuthSDK;
 
 public interface PowerAuthServerApi {
 
@@ -46,6 +51,33 @@ public interface PowerAuthServerApi {
      * @return {@link ServerVersion} enumeration.
      */
     @NonNull ServerVersion getServerVersion() throws Exception;
+
+    /**
+     * Set protocol version used in the mobile client.
+     * @param protocolVersion Protocol version effectively running on the mobile client. If null, then
+     *                        Server API will use highest protocol version supported on the server.
+     */
+    void setClientProtocolVersion(@Nullable ProtocolVersion protocolVersion);
+
+    /**
+     * Update client's protocol version depending on actual algorithm used in the SDK instance.
+     * @param algorithm PowerAuth algorithm used in the instance.
+     */
+    default void setClientAlgorithm(@PowerAuthAlgorithm int algorithm) {
+        if (algorithm == PowerAuthAlgorithm.LEGACY_P256) {
+            setClientProtocolVersion(ProtocolVersion.V3_3);
+        } else {
+            setClientProtocolVersion(ProtocolVersion.V4_0);
+        }
+    }
+
+    /**
+     * Get protocol version used in the mobile client.
+     * @return Protocol version effectively running on the mobile client. If null, then such version
+     * is not specified and Server API is using the highest protocol version supported on the server.
+     */
+    @Nullable
+    ProtocolVersion getClientProtocolVersion();
 
     // Application & Application Version
 
@@ -114,24 +146,6 @@ public interface PowerAuthServerApi {
      */
     void setApplicationVersionSupported(String applicationVersionId, boolean supported) throws Exception;
 
-    // Recovery config
-
-    /**
-     * Get recovery config for application.
-     *
-     * @param applicationId Application identifier.
-     * @return {@link RecoveryConfig} object.
-     * @throws Exception In case of failure.
-     */
-    @NonNull RecoveryConfig getRecoveryConfig(String applicationId) throws Exception;
-
-    /**
-     * Update recovery config for application specified in {@link RecoveryConfig} object.
-     * @param recoveryConfig Config that specifies application and fields that should be updated.
-     * @throws Exception In case of failure.
-     */
-    void updateRecoveryConfig(@NonNull RecoveryConfig recoveryConfig) throws Exception;
-
     // Activation
 
     /**
@@ -197,10 +211,9 @@ public interface PowerAuthServerApi {
      *
      * @param activationId Activation identifier.
      * @param externalUserId Optional external user identifier.
-     * @param revokeRecoveryCodes Also revoke recovery codes associated to this activation.
      * @throws Exception In case of failure.
      */
-    void activationRemove(@NonNull String activationId, @Nullable String externalUserId, boolean revokeRecoveryCodes) throws Exception;
+    void activationRemove(@NonNull String activationId, @Nullable String externalUserId) throws Exception;
 
     /**
      * Remove activation on the server and also revoke any associated recovery code with it.
@@ -248,7 +261,7 @@ public interface PowerAuthServerApi {
      * Get information about activation.
      *
      * @param activationId Activation identifier.
-     * @param challenge Optional challenge, required for acquiring V3.1 {@code encryptedStatusBlob}.
+     * @param challenge Optional challenge, required for acquiring V3.1+ {@code encryptedStatusBlob}.
      * @return {@link ActivationDetail} object.
      * @throws Exception In case of failure.
      */
@@ -272,38 +285,74 @@ public interface PowerAuthServerApi {
      * @param tokenDigest Token digest.
      * @param nonce Nonce in Base64 encoding.
      * @param timestamp Timestamp used for calculate token.
+     * @param protocolVersion Protocol version, required for server 1.5+.
      * @return {@link TokenInfo} object in case of success.
      * @throws Exception In case of failure.
      */
-    @NonNull TokenInfo validateToken(@NonNull String tokenId, @NonNull String tokenDigest, @NonNull String nonce, long timestamp) throws Exception;
+    @NonNull TokenInfo validateToken(@NonNull String tokenId, @NonNull String tokenDigest, @NonNull String nonce, long timestamp, @NonNull String protocolVersion) throws Exception;
 
     // Signatures
 
     /**
-     * Verify online signature on the server.
-     * @param signatureData {@link SignatureData} object that contains common and online-specific properties set.
-     * @return {@link SignatureInfo} with verification result.
+     * Verify online  authentication code on the server.
+     * @param authenticationCodeData {@link AuthenticationCodeData} object that contains common and online-specific properties set.
+     * @return {@link AuthenticationResult} with verification result.
      * @throws Exception In case of failure.
      */
-    @NonNull SignatureInfo verifyOnlineSignature(@NonNull SignatureData signatureData) throws Exception;
+    @NonNull
+    AuthenticationResult verifyOnlineAuthenticationCode(@NonNull AuthenticationCodeData authenticationCodeData) throws Exception;
 
     /**
-     * Verify offline signature on the server.
-     * @param signatureData {@link SignatureData} object that contains common and offline-specific properties set.
-     * @return {@link SignatureInfo} with verification result.
+     * Verify offline authentication code on the server.
+     * @param authenticationCodeData {@link AuthenticationCodeData} object that contains common and offline-specific properties set.
+     * @return {@link AuthenticationResult} with verification result.
      * @throws Exception In case of failure.
      */
-    @NonNull SignatureInfo verifyOfflineSignature(@NonNull SignatureData signatureData) throws Exception;
+    @NonNull
+    AuthenticationResult verifyOfflineAuthenticationCode(@NonNull AuthenticationCodeData authenticationCodeData) throws Exception;
 
     /**
-     * Verify ECDSA signature, calculated with device's private key.
+     * Verify DSA signature, calculated with device's private key.
      * @param activationId Activation identifier.
-     * @param data Signed data.
-     * @param signature Signature for data.
+     * @param data Signed data in Base64 format.
+     * @param signature Signature in Base64 format.
+     * @param format Signature format. Use "DER" or "JOSE".
+     * @param type Signature type. Use "ECDSA" or "MLDSA".
      * @return {@code true} if signature is valid.
      * @throws Exception In case of failure.
      */
-    boolean verifyEcdsaSignature(@NonNull String activationId, @NonNull String data, @NonNull String signature) throws Exception;
+    boolean verifyDsaSignature(@NonNull String activationId, @NonNull String data, @NonNull String signature, @NonNull SignatureFormat format, @NonNull SignatureType type) throws Exception;
+
+    /**
+     * Create DSA signature with using server's public key(s).
+     * @param activationId Activation identifier.
+     * @param data Data to sign in Base64 format.
+     * @return Map, where key is "ECDSA" or "MLDSA", with appropriate signature as value.
+     */
+    Map<SignatureType, String> createDsaSignature(@NonNull String activationId, @Nullable String data) throws Exception;
+
+    /**
+     * Verify JWS signature.
+     * @param activationId Activation identifier.
+     * @param signedData Signed data in form of JWT or JWS.
+     * @param compactForm If true, then JWT is expected (e.g. JWS compact form)
+     * @return {@code true} if signature is valid.
+     * @throws Exception in case of failure.
+     */
+    boolean verifyJwtSignature(@NonNull String activationId, @NonNull String signedData, boolean compactForm) throws Exception;
+
+    /**
+     * Create JWS signature, calculated with Server private key.
+     * @param activationId Activation identifier.
+     * @param data Data to sign, in Base64 format.
+     * @param compactForm If true, then JWT is produced (e.g. JWS compact form)
+     * @param signatureType Signature type. If null is provided, then all available keys are used
+     *                     for the signature calculation.
+     * @return JWT or JWS signature.
+     * @throws Exception In case of failure.
+     */
+    @NonNull
+    String createJwtSignature(@NonNull String activationId, @Nullable String data, boolean compactForm, @Nullable SignatureType signatureType) throws Exception;
 
     /**
      * Create a payload for offline QR code, signed with non-personalized private key.
